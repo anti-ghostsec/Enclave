@@ -19,6 +19,9 @@ jobs:
           java-version: 21
       # Accepts the SDK licences so Gradle can fetch the platform it compiles against.
       - uses: android-actions/setup-android@v3
+        with:
+          # The default list includes the retired 'tools' package, which no longer installs.
+          packages: platform-tools
       - uses: gradle/actions/setup-gradle@v4
       - name: Unit tests
         run: ./gradlew testDebugUnitTest
