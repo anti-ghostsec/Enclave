@@ -25,6 +25,7 @@ An encrypted file vault for Android. No ads, no internet permission, no analytic
 **Quantum resistance:** Enclave uses only 256-bit symmetric cryptography (AES-256, SHA-2 and Argon2id), with no RSA or ECC anywhere.
 
 ### Known limits
+- Enclave hasn't been audited by an independent security firm. If being found out could put you in danger, don't rely on it alone.
 - A backup of the raw vault only works on the same phone, because it's bound to that phone's hardware key. Uninstalling Enclave or resetting the phone destroys the vault.
 - The number of files, and roughly the order they were written in, is still visible to someone with raw access to the app's storage. Android's change times and inode numbers can't be set by apps.
 - A decoy vault is a separate directory, so raw storage shows that more than one vault exists.
