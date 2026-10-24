@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="icon_bg_enclave">#1B1F3B</color>
+    <color name="icon_bg_calculator">#FF8F00</color>
+    <color name="icon_bg_notes">#FBC02D</color>
+    <color name="icon_bg_weather">#1E88E5</color>
+    <color name="icon_bg_clock">#263238</color>
+    <color name="icon_bg_compass">#00897B</color>
+    <color name="icon_bg_tools">#546E7A</color>
+</resources>
