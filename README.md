@@ -3,8 +3,8 @@
 An encrypted file vault for Android. No ads, no internet permission, no analytics.
 
 ## Features
-- **Encrypted vault** for any files: folders, move, multi-select, search, sort, and a grid or list view with encrypted thumbnails.
-- **Built-in viewer**: swipe through photos, GIFs, videos and audio. It has pinch zoom and a slideshow, and videos start muted. Playback reads straight from the encrypted file.
+- **Encrypted vault** for any files: folders, move, multi-select, search, sort, a grid or list view with encrypted thumbnails, and a duplicate finder.
+- **Built-in viewer**: swipe through photos, GIFs, videos and audio. It has pinch zoom, a slideshow and a delete button. Videos start muted and loop. Playback reads straight from the encrypted file.
 - **Safer sharing**: Enclave's own share list shows apps only, never people or recent chats. You can limit it to apps you choose and confirm before anything is sent. Shared links end when the screen turns off, or after 30 minutes.
 - **Other apps can pick from Enclave** (opt-in): browsers and chats can attach a vault file directly.
 - **Password plus an optional keyfile**, **duress passwords** (decoy vault or silent wipe), wipe after N wrong attempts, and exponential lock-out.

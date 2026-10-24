@@ -36,6 +36,11 @@ import app.enclave.vault.VaultStore
 
 private const val SECURE_FOLDER = "com.motorola.securevault"
 
+private fun isOutside(r: ResolveInfo) = r.activityInfo.packageName == SECURE_FOLDER
+
+private fun labelOf(r: ResolveInfo, pm: android.content.pm.PackageManager) =
+    if (isOutside(r)) "Outside Secure Folder" else r.loadLabel(pm).toString()
+
 /** Shows the share prompt whenever something asks to share. Place once per screen. */
 @Composable
 fun ShareHost(store: VaultStore) {
@@ -55,10 +60,9 @@ private fun ShareDialog(store: VaultStore, files: List<Entry>, onDone: () -> Uni
     val all = remember(files) { Opener.shareTargets(ctx, files) }
     val allowed = settings.shareApps
     // Motorola Secure Folder's share entry is the way out to the normal side of the phone
-    // (e.g. its Downloads folder). It isn't a person, so it's always offered, at the top.
-    val outside = all.filter { it.activityInfo.packageName == SECURE_FOLDER }
-    val apps = all - outside.toSet()
-    val shown = outside + if (allowed.isEmpty()) apps else apps.filter { Opener.componentOf(it).flattenToString() in allowed }
+    // (e.g. its Downloads folder). Listed first; it can be unticked like any other app.
+    val ordered = all.sortedBy { !isOutside(it) }
+    val shown = if (allowed.isEmpty()) ordered else ordered.filter { Opener.componentOf(it).flattenToString() in allowed }
     var confirming by remember { mutableStateOf<ResolveInfo?>(null) }
     var editing by remember { mutableStateOf(false) }
     val pm = ctx.packageManager
@@ -70,7 +74,7 @@ private fun ShareDialog(store: VaultStore, files: List<Entry>, onDone: () -> Uni
 
     val target = confirming
     if (target != null) {
-        val app = target.loadLabel(pm).toString()
+        val app = labelOf(target, pm)
         AlertDialog(
             onDismissRequest = { confirming = null },
             title = { Text("Send to $app?") },
@@ -112,11 +116,9 @@ private fun ShareDialog(store: VaultStore, files: List<Entry>, onDone: () -> Uni
                                 if (settings.confirmShare) confirming = r
                                 else { Opener.sendTo(ctx, store, files, Opener.componentOf(r)); onDone() }
                             },
-                            headlineContent = {
-                                Text(if (r in outside) "Outside Secure Folder" else r.loadLabel(pm).toString())
-                            },
+                            headlineContent = { Text(labelOf(r, pm)) },
                             supportingContent = {
-                                if (r in outside) Text("To the normal side of your phone, e.g. Downloads (Motorola Secure Folder)")
+                                if (isOutside(r)) Text("To the normal side of your phone, e.g. Downloads (Motorola Secure Folder)")
                             },
                             leadingContent = { AppIcon(r) },
                         )
@@ -154,11 +156,11 @@ fun ShareAppsEditor(store: VaultStore, targets: List<ResolveInfo>, onDone: () ->
                     style = MaterialTheme.typography.bodySmall,
                 )
                 LazyColumn(Modifier.heightIn(max = 400.dp).padding(top = 8.dp)) {
-                    items(targets, key = { Opener.componentOf(it).flattenToString() }) { r ->
+                    items(targets.sortedBy { !isOutside(it) }, key = { Opener.componentOf(it).flattenToString() }) { r ->
                         val id = Opener.componentOf(r).flattenToString()
                         ListItem(
                             modifier = Modifier.clickable { if (id in chosen) chosen.remove(id) else chosen.add(id) },
-                            headlineContent = { Text(r.loadLabel(pm).toString()) },
+                            headlineContent = { Text(labelOf(r, pm)) },
                             leadingContent = { AppIcon(r) },
                             trailingContent = { Checkbox(checked = id in chosen, onCheckedChange = null) },
                         )

@@ -35,13 +35,17 @@ import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Slideshow
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Slider
@@ -56,6 +60,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -78,6 +84,8 @@ import app.enclave.vault.Media
 import app.enclave.vault.VaultStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 
@@ -87,35 +95,54 @@ import java.nio.ByteBuffer
  * Everything is decrypted in memory only.
  */
 @Composable
-fun ViewerScreen(store: VaultStore, items: List<Entry>, start: Int, onClose: () -> Unit) {
-    BackHandler(onBack = onClose)
+fun ViewerScreen(store: VaultStore, items: List<Entry>, start: Int, onClose: (last: Entry?) -> Unit) {
     val ctx = LocalContext.current
     val settings by store.settings.collectAsStateWithLifecycle()
-    val pager = rememberPagerState(initialPage = start.coerceIn(0, (items.size - 1).coerceAtLeast(0))) { items.size }
+    // A copy, so files deleted from the viewer drop out of it.
+    val pages = remember { items.toMutableStateList() }
+    val pager = rememberPagerState(initialPage = start.coerceIn(0, (items.size - 1).coerceAtLeast(0))) { pages.size }
     var slideshow by remember { mutableStateOf(false) }
     var zoomed by remember { mutableStateOf(false) }
     var chrome by remember { mutableStateOf(true) }
+    var confirmDelete by remember { mutableStateOf(false) }
     // Lets the slideshow wait for a video or song to finish before moving on.
     var mediaPlaying by remember { mutableStateOf(false) }
+
+    val current = pages.getOrNull(pager.currentPage)
+    BackHandler { onClose(current) }
 
     val view = LocalView.current
     DisposableEffect(slideshow) {
         view.keepScreenOn = slideshow
         onDispose { view.keepScreenOn = false }
     }
-    LaunchedEffect(slideshow, pager.currentPage) {
-        if (!slideshow) return@LaunchedEffect
-        delay(settings.slideshowSeconds * 1000L)
-        while (mediaPlaying) delay(300)
-        if (pager.currentPage < items.size - 1) pager.animateScrollToPage(pager.currentPage + 1) else slideshow = false
+    // One loop for the whole slideshow. (Restarting it on every page change cancelled the
+    // scroll halfway through, which made it bounce between two pictures.)
+    LaunchedEffect(slideshow) {
+        while (slideshow) {
+            val here = pages.getOrNull(pager.settledPage) ?: break
+            if (Media.isVideo(here) || Media.isAudio(here)) {
+                withTimeoutOrNull(10_000) { snapshotFlow { mediaPlaying }.first { it } }
+                snapshotFlow { mediaPlaying }.first { !it }
+                delay(500)
+            } else {
+                delay(settings.slideshowSeconds * 1000L)
+            }
+            val next = pager.settledPage + 1
+            if (next >= pages.size) { slideshow = false; break }
+            pager.animateScrollToPage(next)
+        }
     }
     LaunchedEffect(pager.currentPage) { zoomed = false; mediaPlaying = false }
 
-    val current = items.getOrNull(pager.currentPage) ?: return onClose()
+    if (current == null) {
+        LaunchedEffect(Unit) { onClose(null) }
+        return
+    }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         val page: @Composable (Int) -> Unit = { i ->
-            val e = items[i]
+            val e = pages[i]
             val active = i == pager.currentPage
             when {
                 Media.isVideo(e) || Media.isAudio(e) -> PlayerPage(
@@ -127,28 +154,48 @@ fun ViewerScreen(store: VaultStore, items: List<Entry>, start: Int, onClose: () 
             }
         }
         if (settings.swipeVertical) {
-            VerticalPager(pager, Modifier.fillMaxSize(), userScrollEnabled = !zoomed, key = { items[it].id }) { page(it) }
+            VerticalPager(pager, Modifier.fillMaxSize(), userScrollEnabled = !zoomed, key = { pages[it].id }) { page(it) }
         } else {
-            HorizontalPager(pager, Modifier.fillMaxSize(), userScrollEnabled = !zoomed, key = { items[it].id }) { page(it) }
+            HorizontalPager(pager, Modifier.fillMaxSize(), userScrollEnabled = !zoomed, key = { pages[it].id }) { page(it) }
         }
 
         if (chrome) Row(
             Modifier.fillMaxWidth().background(Color.Black.copy(alpha = 0.45f)).systemBarsPadding().padding(4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
+            IconButton(onClick = { onClose(current) }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
             Column(Modifier.weight(1f)) {
                 Text(current.name, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("${pager.currentPage + 1} of ${items.size}", color = Color.White.copy(alpha = 0.7f), style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
+                Text(
+                    "${pager.currentPage + 1} of ${pages.size} · ${humanSize(current.size)}",
+                    color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall,
+                )
             }
-            if (items.size > 1) IconButton(onClick = { slideshow = !slideshow }) {
+            if (pages.size > 1) IconButton(onClick = { slideshow = !slideshow }) {
                 Icon(if (slideshow) Icons.Default.Stop else Icons.Default.Slideshow, if (slideshow) "Stop slideshow" else "Slideshow", tint = Color.White)
             }
             IconButton(onClick = { Opener.share(ctx, store, listOf(current)) }) { Icon(Icons.Default.Share, "Share", tint = Color.White) }
             IconButton(onClick = { Opener.openExternally(ctx, store, current, alwaysAsk = true) }) {
                 Icon(Icons.AutoMirrored.Filled.OpenInNew, "Open with another app", tint = Color.White)
             }
+            IconButton(onClick = { slideshow = false; confirmDelete = true }) { Icon(Icons.Default.Delete, "Delete", tint = Color.White) }
         }
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete “${current.name}”?") },
+            text = { Text("It will be removed from the vault for good.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = false
+                    store.delete(listOf(current.id))
+                    pages.remove(current)
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
+        )
     }
 }
 
@@ -245,6 +292,8 @@ private fun PlayerPage(store: VaultStore, e: Entry, active: Boolean, autoPlay: B
         }
     }
     LaunchedEffect(player, surface) { surface?.let { player?.setSurface(it) } }
+    // Loop when watching normally; play once during a slideshow so it can move on.
+    LaunchedEffect(player, autoPlay) { runCatching { player?.isLooping = !autoPlay } }
     LaunchedEffect(player, volume) { runCatching { player?.setVolume(volume, volume) } }
     LaunchedEffect(active, prepared, autoPlay) {
         val mp = player ?: return@LaunchedEffect

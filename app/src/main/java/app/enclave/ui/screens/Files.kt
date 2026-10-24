@@ -7,12 +7,15 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.MusicNote
@@ -123,7 +126,15 @@ class PickRequest(val allowMultiple: Boolean, val onPick: (List<Entry>) -> Unit)
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
-fun FilesScreen(store: VaultStore, onView: (List<Entry>, Int) -> Unit, pick: PickRequest? = null) {
+fun FilesScreen(
+    store: VaultStore,
+    onView: (List<Entry>, Int) -> Unit,
+    pick: PickRequest? = null,
+    /** False while another screen covers this one, so Back goes to that screen instead. */
+    active: Boolean = true,
+    /** A file to scroll into view, e.g. the last one shown in the viewer. */
+    focus: String? = null,
+) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val all by store.entries.collectAsStateWithLifecycle()
@@ -138,7 +149,10 @@ fun FilesScreen(store: VaultStore, onView: (List<Entry>, Int) -> Unit, pick: Pic
         sortEntries(base, settings.sort, settings.sortDescending)
     }
     var sortMenu by remember { mutableStateOf(false) }
+    var findingDuplicates by remember { mutableStateOf(false) }
     val selected = remember { mutableStateListOf<String>() }
+    val gridState = rememberLazyGridState()
+    val listState = rememberLazyListState()
     val selecting = selected.isNotEmpty()
 
     var importing by remember { mutableStateOf<Pair<Int, Int>?>(null) }
@@ -152,7 +166,7 @@ fun FilesScreen(store: VaultStore, onView: (List<Entry>, Int) -> Unit, pick: Pic
     var addMenu by remember { mutableStateOf(false) }
 
     // Back clears the selection first, then goes up a folder.
-    BackHandler(enabled = selecting || searching || path.isNotEmpty()) {
+    BackHandler(enabled = active && (selecting || searching || path.isNotEmpty())) {
         when {
             selecting -> selected.clear()
             searching -> query = ""
@@ -265,6 +279,7 @@ fun FilesScreen(store: VaultStore, onView: (List<Entry>, Int) -> Unit, pick: Pic
                             )
                         }
                     }
+                    if (pick == null) IconButton(onClick = { findingDuplicates = true }) { Icon(Icons.Default.ContentCopy, "Find duplicates") }
                     IconButton(onClick = { store.updateSettings { it.copy(grid = !it.grid) } }) {
                         Icon(if (settings.grid) Icons.AutoMirrored.Filled.ViewList else Icons.Default.GridView, "Change view")
                     }
@@ -318,9 +333,17 @@ fun FilesScreen(store: VaultStore, onView: (List<Entry>, Int) -> Unit, pick: Pic
                 }
             }
 
+            // After viewing, bring the last file shown back into view if it scrolled away.
+            LaunchedEffect(focus) {
+                val i = children.indexOfFirst { it.id == focus }
+                if (i < 0) return@LaunchedEffect
+                if (settings.grid) {
+                    if (gridState.layoutInfo.visibleItemsInfo.none { it.index == i }) gridState.scrollToItem(i)
+                } else if (listState.layoutInfo.visibleItemsInfo.none { it.index == i }) listState.scrollToItem(i)
+            }
             if (settings.grid) {
                 LazyVerticalGrid(
-                    GridCells.Adaptive(112.dp), Modifier.fillMaxSize(),
+                    GridCells.Adaptive(112.dp), Modifier.fillMaxSize(), state = gridState,
                     contentPadding = PaddingValues(start = 8.dp, end = 8.dp, bottom = 88.dp),
                 ) {
                     gridItems(children, key = { it.id }) { e ->
@@ -344,11 +367,15 @@ fun FilesScreen(store: VaultStore, onView: (List<Entry>, Int) -> Unit, pick: Pic
                                 }
                             }
                             Text(e.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
+                            if (!e.folder) Text(
+                                humanSize(e.size), maxLines = 1, style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }
             } else {
-                LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 88.dp)) {
+                LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = 88.dp)) {
                     items(children, key = { it.id }) { e ->
                         var menu by remember { mutableStateOf(false) }
                         val isSel = e.id in selected
@@ -400,6 +427,7 @@ fun FilesScreen(store: VaultStore, onView: (List<Entry>, Int) -> Unit, pick: Pic
         }
     }
 
+    if (findingDuplicates) DuplicatesScreen(store, onClose = { findingDuplicates = false })
     if (newFolder) NameDialog("New folder", "", onDismiss = { newFolder = false }) {
         store.createFolder(it, folder?.id); newFolder = false
     }
@@ -518,7 +546,7 @@ private fun iconFor(e: Entry) = when {
 
 /** A decrypted-in-memory preview for photos and videos, or an icon for everything else. */
 @Composable
-private fun Preview(store: VaultStore, e: Entry, modifier: Modifier) {
+internal fun Preview(store: VaultStore, e: Entry, modifier: Modifier) {
     val thumb by produceState<Bitmap?>(null, e.id) {
         if (Media.isImage(e) || Media.isVideo(e)) value = withContext(thumbnailWork) { store.thumbnail(e) }
     }

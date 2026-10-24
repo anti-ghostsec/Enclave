@@ -48,15 +48,20 @@ class PickActivity : ComponentActivity() {
                     val unlocked by Session.state.collectAsStateWithLifecycle()
                     var viewing by remember { mutableStateOf<Pair<List<Entry>, Int>?>(null) }
                     val s = unlocked
-                    when {
-                        s == null -> LockScreen(onWiped = { finish() })
-                        viewing != null -> ViewerScreen(s.store, viewing!!.first, viewing!!.second, onClose = { viewing = null })
-                        else -> Box(Modifier.systemBarsPadding()) {
+                    var focus by remember { mutableStateOf<String?>(null) }
+                    if (s == null) LockScreen(onWiped = { finish() })
+                    else Box(Modifier.fillMaxSize()) {
+                        Box(Modifier.systemBarsPadding()) {
                             FilesScreen(
                                 s.store,
                                 onView = { items, i -> viewing = items to i },
                                 pick = PickRequest(multiple) { picked -> deliver(picked) },
+                                active = viewing == null,
+                                focus = focus,
                             )
+                        }
+                        viewing?.let { (items, start) ->
+                            ViewerScreen(s.store, items, start, onClose = { last -> focus = last?.id; viewing = null })
                         }
                     }
                 }

@@ -1,6 +1,7 @@
 package app.enclave.ui.screens
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Folder
@@ -12,6 +13,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -31,40 +33,49 @@ import app.enclave.vault.Session
 fun HomeScreen(s: Session.Unlocked) {
     var tab by remember { mutableIntStateOf(0) }
     var viewing by remember { mutableStateOf<Pair<List<Entry>, Int>?>(null) }
+    // The file the viewer was showing when closed, so the list can scroll back to it.
+    var focus by remember { mutableStateOf<String?>(null) }
 
     ShareHost(s.store)
 
-    viewing?.let { (items, start) ->
-        ViewerScreen(s.store, items, start, onClose = { viewing = null })
-        return
-    }
-
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(listOf("Files", "Settings")[tab]) },
-                actions = {
-                    IconButton(onClick = { Session.lock() }) { Icon(Icons.Default.Lock, "Lock now") }
-                },
-            )
-        },
-        bottomBar = {
-            NavigationBar {
-                listOf(Icons.Default.Folder to "Files", Icons.Default.Settings to "Settings")
-                    .forEachIndexed { i, (icon, label) ->
-                        NavigationBarItem(
-                            selected = tab == i, onClick = { tab = i },
-                            icon = { Icon(icon, null) }, label = { Text(label) },
-                        )
-                    }
+    Box(Modifier.fillMaxSize()) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text(listOf("Files", "Settings")[tab]) },
+                    actions = {
+                        IconButton(onClick = { Session.lock() }) { Icon(Icons.Default.Lock, "Lock now") }
+                    },
+                )
+            },
+            bottomBar = {
+                NavigationBar {
+                    listOf(Icons.Default.Folder to "Files", Icons.Default.Settings to "Settings")
+                        .forEachIndexed { i, (icon, label) ->
+                            NavigationBarItem(
+                                selected = tab == i, onClick = { tab = i },
+                                icon = { Icon(icon, null) }, label = { Text(label) },
+                            )
+                        }
+                }
+            },
+        ) { pad ->
+            Box(Modifier.padding(pad).fillMaxSize()) {
+                // Files stays alive behind Settings and the viewer, so the open folder and the
+                // scroll position are still there when you come back.
+                FilesScreen(
+                    s.store,
+                    onView = { items, i -> viewing = items to i },
+                    active = tab == 0 && viewing == null,
+                    focus = focus,
+                )
+                if (tab == 1) Surface(Modifier.fillMaxSize()) {
+                    SettingsScreen(s, disguiseLabel = Disguise.current().label)
+                }
             }
-        },
-    ) { pad ->
-        Box(Modifier.padding(pad)) {
-            when (tab) {
-                0 -> FilesScreen(s.store, onView = { items, i -> viewing = items to i })
-                else -> SettingsScreen(s, disguiseLabel = Disguise.current().label)
-            }
+        }
+        viewing?.let { (items, start) ->
+            ViewerScreen(s.store, items, start, onClose = { last -> focus = last?.id; viewing = null })
         }
     }
 }

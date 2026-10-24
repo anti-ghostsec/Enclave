@@ -103,4 +103,18 @@ class UpgradeTest {
         assertEquals(10, names.size)
         assertTrue(names.all { n -> reopened.entries.value.any { n == it.id || n == "${it.id}.t" } })
     }
+
+    @Test
+    fun duplicatesAreFoundByContentNotName() {
+        val dir = Files.createTempDirectory("vault").toFile()
+        val store = VaultStore(dir, Aead.random(32))
+        val a = Aead.random(5000)
+        val b = Aead.random(5000) // same size, different bytes: not a duplicate
+        fun add(name: String, bytes: ByteArray) = store.importFile(File.createTempFile("dup", name).apply { writeBytes(bytes) }, null)
+        add("a1", a); add("a2", a); add("a3", a); add("b", b); add("c", Aead.random(10))
+        val groups = store.findDuplicates { _, _ -> }
+        assertEquals(1, groups.size)
+        assertEquals(3, groups[0].size)
+        assertEquals(5, store.entries.value.size) // finding never deletes anything
+    }
 }

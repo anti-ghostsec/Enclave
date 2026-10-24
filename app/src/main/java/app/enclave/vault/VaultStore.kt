@@ -435,6 +435,29 @@ class VaultStore(val dir: File, master: ByteArray) {
         }
     }
 
+    /**
+     * Groups of files with identical contents. Only files of the same size are compared, by a
+     * SHA-256 of their decrypted contents, so it reads as little as possible. Nothing is deleted.
+     */
+    fun findDuplicates(progress: (done: Int, total: Int) -> Unit): List<List<Entry>> {
+        val candidates = _entries.value.filter { !it.folder }.groupBy { it.size }.values.filter { it.size > 1 }.flatten()
+        val byHash = HashMap<String, MutableList<Entry>>()
+        val buf = ByteArray(64 * 1024)
+        candidates.forEachIndexed { i, e ->
+            if (closed) return emptyList()
+            runCatching {
+                val md = MessageDigest.getInstance("SHA-256")
+                reader(e).use { r -> r.inputStream().use { input -> while (true) { val n = input.read(buf); if (n < 0) break; md.update(buf, 0, n) } } }
+                byHash.getOrPut("${e.size}:${Aead.hex(md.digest())}") { mutableListOf() } += e
+            }
+            progress(i + 1, candidates.size)
+        }
+        buf.fill(0)
+        return byHash.values.filter { it.size > 1 }
+            .map { g -> g.sortedBy { it.added } }
+            .sortedByDescending { it.first().size * (it.size - 1) }
+    }
+
     @Synchronized
     fun close() {
         closed = true
