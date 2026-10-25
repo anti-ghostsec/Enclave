@@ -10,7 +10,7 @@ An encrypted file vault for Android. No ads, no internet permission, no analytic
 - **Password plus an optional keyfile**, **duress passwords** (decoy vault or silent wipe), wipe after N wrong attempts, and exponential lock-out.
 - **Disguise** (off by default): a preset name and icon, a working calculator front, or a custom home-screen icon.
 - Locks when the screen turns off or Enclave is left. Screenshots, recent-apps previews and audio capture are blocked.
-- A built-in folder browser for import, export and keyfiles. It works inside profiles where the system file picker doesn't, such as Motorola Secure Folder.
+- A built-in folder browser for import, export and keyfiles. It works inside profiles where the system file picker doesn't, such as Motorola Secure Folder, and shows photo and video previews that are made in memory and never saved.
 
 ## Security model
 

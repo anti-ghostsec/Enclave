@@ -6,7 +6,9 @@ import android.graphics.ImageDecoder
 import android.media.MediaDataSource
 import android.media.MediaMetadataRetriever
 import android.media.ThumbnailUtils
+import android.util.Size
 import app.enclave.crypto.ChunkedCipher
+import java.io.File
 import java.nio.ByteBuffer
 
 /** Lets Android's media code (thumbnails, video frames) read an encrypted file without a plaintext copy. */
@@ -66,6 +68,28 @@ object Media {
         return store.reader(e).use {
             BitmapFactory.decodeStream(it.inputStream(), null, BitmapFactory.Options().apply { inSampleSize = sample })
         }
+    }
+
+    /** A file's type from its name alone, for files outside the vault. */
+    fun mimeOfName(name: String): String =
+        android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())
+            ?: "application/octet-stream"
+
+    /**
+     * A preview of a file outside the vault (for the built-in folder browser), made in memory.
+     * Nothing is written anywhere and Android's media index isn't asked, so browsing leaves no
+     * thumbnails behind on the phone.
+     */
+    fun makeThumbnail(f: File): Bitmap? {
+        val mime = mimeOfName(f.name)
+        val size = Size(THUMB, THUMB)
+        return runCatching {
+            when {
+                mime.startsWith("image/") -> ThumbnailUtils.createImageThumbnail(f, size, null)
+                mime.startsWith("video/") -> ThumbnailUtils.createVideoThumbnail(f, size, null)
+                else -> null
+            }
+        }.getOrNull()
     }
 
     fun makeThumbnail(store: VaultStore, e: Entry): Bitmap? = when {
