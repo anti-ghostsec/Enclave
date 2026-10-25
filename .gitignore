@@ -9,3 +9,4 @@ local.properties
 *.keystore
 *.apk
 *.tar
+/native/target/

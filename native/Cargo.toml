@@ -1,0 +1,5 @@
+# Enclave's Rust code. The app doesn't use it yet: the vault will move into
+# a deniable container once the app can load native code.
+[workspace]
+resolver = "2"
+members = ["deniable"]
