@@ -9,7 +9,10 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Base64
 import app.enclave.crypto.Aead
+import app.enclave.crypto.BlobSource
+import app.enclave.crypto.BytesBlob
 import app.enclave.crypto.ChunkedCipher
+import app.enclave.crypto.FileBlob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.Serializable
@@ -35,7 +38,15 @@ data class Entry(
 )
 
 @Serializable
-data class DuressSlot(val slot: Int, val action: String, val label: String, val dir: String? = null)
+data class DuressSlot(
+    val slot: Int,
+    val action: String,
+    val label: String,
+    /** An old-format decoy's directory. */
+    val dir: String? = null,
+    /** A decoy in the containers: its master key, so the real vault can protect and fill it. */
+    val master: String? = null,
+)
 
 @Serializable
 data class VaultSettings(
@@ -61,20 +72,19 @@ data class VaultSettings(
 private data class Index(val entries: List<Entry> = emptyList())
 
 /**
- * One unlocked vault: an encrypted index (names, folders, per-file keys) plus encrypted blobs.
+ * One unlocked vault: an encrypted index (names, folders, per-file keys) plus encrypted blobs,
+ * kept in a [Storage]: deniable containers, or the original one-directory-per-vault format.
  *
- * What someone who copies the vault's raw files can still learn is kept to a minimum:
- * - blobs are padded (Padmé), so sizes can't be matched to known originals;
- * - every file has a preview file of one fixed size, so previews don't reveal which are media;
- * - every file's modified time is set to the same fixed date, hiding when things were added.
+ * In the original format, what someone who copies the raw files can still learn is kept to a
+ * minimum: blobs are padded (Padmé), every preview file has one fixed size, and every file's
+ * modified time is the same fixed date. Inside containers none of that is visible at all.
  */
-class VaultStore(val dir: File, master: ByteArray) {
+class VaultStore(val storage: Storage, master: ByteArray) {
+    constructor(dir: File, master: ByteArray) : this(DirStorage(dir), master)
+
     private val indexKey = Aead.subkey(master, "index")
     private val settingsKey = Aead.subkey(master, "settings")
     private val json = Json { ignoreUnknownKeys = true }
-
-    private val indexFile = File(dir, "index.enc")
-    private val settingsFile = File(dir, "settings.enc")
 
     private val _entries = MutableStateFlow<List<Entry>>(emptyList())
     val entries: StateFlow<List<Entry>> = _entries
@@ -87,15 +97,13 @@ class VaultStore(val dir: File, master: ByteArray) {
 
     @Volatile private var closed = false
 
+    /** The last thing that couldn't be saved, for the UI to show once. */
+    val problem = MutableStateFlow<String?>(null)
+
     init {
-        dir.mkdirs()
-        if (indexFile.exists()) {
-            _entries.value = json.decodeFromString<Index>(String(Aead.open(indexKey, indexFile.readBytes()))).entries
-        }
-        if (settingsFile.exists()) {
-            _settings.value = json.decodeFromString(String(Aead.open(settingsKey, settingsFile.readBytes())))
-        }
-        removeLeftovers()
+        storage.loadIndex()?.let { _entries.value = json.decodeFromString<Index>(String(Aead.open(indexKey, it))).entries }
+        storage.loadSettings()?.let { _settings.value = json.decodeFromString(String(Aead.open(settingsKey, it))) }
+        if (!storage.readOnly) removeLeftovers()
     }
 
     /**
@@ -103,29 +111,11 @@ class VaultStore(val dir: File, master: ByteArray) {
      * mid-import or mid-upgrade). Runs before the vault is shown, so nothing is in progress.
      */
     private fun removeLeftovers() {
-        val live = _entries.value.filter { !it.folder }.map { it.id }.toSet()
-        dir.listFiles()?.forEach { f ->
-            val n = f.name
-            val id = n.removeSuffix(".tmp").removeSuffix(".t")
-            when {
-                n.endsWith(".tmp") -> f.delete()
-                id.length == 32 && id.all { it in '0'..'9' || it in 'a'..'f' } && id !in live -> f.delete()
-            }
-        }
-    }
-
-    private fun stamp(f: File) {
-        f.setLastModified(FIXED_TIME)
-        dir.setLastModified(FIXED_TIME)
-    }
-
-    private fun atomicWrite(f: File, bytes: ByteArray) {
-        val tmp = File(f.path + ".tmp")
-        tmp.writeBytes(bytes)
-        if (!tmp.renameTo(f)) {
-            f.delete(); tmp.renameTo(f)
-        }
-        stamp(f)
+        (storage as? DirStorage)?.removeTemporaryFiles()
+        val live = _entries.value.filter { !it.folder }.flatMap { listOf(it.id, thumbName(it.id)) }.toSet()
+        val orphans = storage.names() - live
+        orphans.forEach { runCatching { storage.delete(it) } }
+        if (orphans.isNotEmpty()) runCatching { storage.commit() }
     }
 
     /**
@@ -138,7 +128,12 @@ class VaultStore(val dir: File, master: ByteArray) {
         val before = _entries.value
         val after = change(before)
         if (after == before) return false
-        atomicWrite(indexFile, Aead.seal(indexKey, json.encodeToString(Index(after)).toByteArray()))
+        try {
+            storage.saveIndex(Aead.seal(indexKey, json.encodeToString(Index(after)).toByteArray()))
+        } catch (e: java.io.IOException) {
+            problem.value = e.message ?: "Couldn't save"
+            return false
+        }
         _entries.value = after
         return true
     }
@@ -147,13 +142,16 @@ class VaultStore(val dir: File, master: ByteArray) {
     fun updateSettings(f: (VaultSettings) -> VaultSettings) {
         if (closed) return
         val s = f(_settings.value)
-        atomicWrite(settingsFile, Aead.seal(settingsKey, json.encodeToString(s).toByteArray()))
+        try {
+            storage.saveSettings(Aead.seal(settingsKey, json.encodeToString(s).toByteArray()))
+        } catch (e: java.io.IOException) {
+            problem.value = e.message ?: "Couldn't save"
+            return
+        }
         _settings.value = s
     }
 
     private fun newId() = Aead.hex(Aead.random(16))
-    private fun blob(id: String) = File(dir, id)
-    private fun blob(e: Entry) = blob(e.id)
     private fun keyOf(e: Entry) = Base64.decode(e.key, Base64.NO_WRAP)
 
     fun children(parent: String?) = _entries.value.filter { it.parent == parent }
@@ -176,17 +174,10 @@ class VaultStore(val dir: File, master: ByteArray) {
     private fun mimeOf(name: String) =
         MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase()) ?: "application/octet-stream"
 
-    /** Encrypts into a new blob + placeholder preview. Returns (size, key) once both are in place. */
+    /** Encrypts into a new blob. Returns the original size. */
     private fun writeBlob(id: String, key: ByteArray, open: () -> InputStream): Long {
-        val tmp = File(dir, "$id.tmp")
-        val size = try {
-            open().use { input -> tmp.outputStream().buffered().use { out -> ChunkedCipher.encrypt(key, input, out) } }
-        } catch (t: Throwable) {
-            tmp.delete(); throw t
-        }
-        val f = blob(id)
-        tmp.renameTo(f)
-        stamp(f)
+        var size = 0L
+        open().use { input -> storage.put(id) { out -> size = ChunkedCipher.encrypt(key, input, out) } }
         return size
     }
 
@@ -199,22 +190,37 @@ class VaultStore(val dir: File, master: ByteArray) {
         val e = Entry(id, parent, name, false, size, mime, System.currentTimeMillis(), Base64.encodeToString(key, Base64.NO_WRAP))
         key.fill(0)
         if (!updateEntries { it + e }) {
-            blob(id).delete(); thumbFile(id).delete()
-            error("vault is locked")
+            runCatching { storage.delete(id); storage.delete(thumbName(id)) }
+            error(problem.value ?: "vault is locked")
         }
         return e
     }
 
-    fun reader(e: Entry) = ChunkedCipher.Reader(blob(e), keyOf(e), e.size)
+    fun reader(e: Entry) = ChunkedCipher.Reader(storage.open(e.id), keyOf(e), e.size)
 
-    fun blobOf(e: Entry) = blob(e)
+    /**
+     * How a share reads this file's (still encrypted) bytes. Small files are copied into memory
+     * so a share keeps working after the vault locks; big ones in a container stop at the lock.
+     */
+    fun shareSource(e: Entry): () -> BlobSource {
+        val st = storage
+        if (st is DirStorage) {
+            val f = st.file(e.id)
+            return { FileBlob(f) }
+        }
+        if (e.size <= SHARE_IN_MEMORY) {
+            val bytes = st.open(e.id).use { it.readAll() }
+            return { BytesBlob(bytes) }
+        }
+        return { st.open(e.id) }
+    }
 
     /** A copy of one file's key, for [Shares]. */
     fun keyBytes(e: Entry) = keyOf(e)
 
     // ---- Previews -------------------------------------------------------------------------
 
-    private fun thumbFile(id: String) = File(dir, "$id.t")
+    private fun thumbName(id: String) = "$id.t"
     private val thumbs = object : LruCache<String, Bitmap>(24 * 1024 * 1024) {
         override fun sizeOf(k: String, v: Bitmap) = v.byteCount
     }
@@ -231,16 +237,16 @@ class VaultStore(val dir: File, master: ByteArray) {
         ByteBuffer.wrap(body).putInt(len)
         jpg?.copyInto(body, 4)
         val k = Aead.subkey(fileKey, "thumbnail")
-        atomicWrite(thumbFile(id), Aead.seal(k, body))
+        val sealed = Aead.seal(k, body)
         k.fill(0); body.fill(0)
+        storage.put(thumbName(id)) { it.write(sealed) }
     }
 
     /** The JPEG inside a preview file (current or old format), or null if there's none yet. */
     private fun readThumbJpg(id: String, fileKey: ByteArray): ByteArray? {
-        val f = thumbFile(id)
-        if (!f.exists()) return null
+        if (!storage.has(thumbName(id))) return null
         val k = Aead.subkey(fileKey, "thumbnail")
-        val body = runCatching { Aead.open(k, f.readBytes()) }.getOrNull()
+        val body = runCatching { Aead.open(k, storage.open(thumbName(id)).use { it.readAll() }) }.getOrNull()
         k.fill(0)
         if (body == null) return null
         if (body.size != THUMB_BYTES) return body // first version: the sealed JPEG itself
@@ -249,10 +255,9 @@ class VaultStore(val dir: File, master: ByteArray) {
     }
 
     private fun thumbState(id: String, fileKey: ByteArray): Int? {
-        val f = thumbFile(id)
-        if (!f.exists() || f.length() != SEALED_THUMB_BYTES) return null
+        if (storage.size(thumbName(id)) != SEALED_THUMB_BYTES) return null
         val k = Aead.subkey(fileKey, "thumbnail")
-        val body = runCatching { Aead.open(k, f.readBytes()) }.getOrNull()
+        val body = runCatching { Aead.open(k, storage.open(thumbName(id)).use { it.readAll() }) }.getOrNull()
         k.fill(0)
         return body?.let { ByteBuffer.wrap(it).int }
     }
@@ -283,7 +288,9 @@ class VaultStore(val dir: File, master: ByteArray) {
             if (closed) return null
             val bmp = runCatching { Media.makeThumbnail(this, e) }.getOrNull()
             val jpg = bmp?.let(::jpegOf)
-            if (!closed && _entries.value.any { it.id == e.id }) writeThumb(e.id, key, jpg, if (jpg == null) THUMB_NONE else THUMB_PENDING)
+            if (!closed && !storage.readOnly && _entries.value.any { it.id == e.id }) {
+                runCatching { writeThumb(e.id, key, jpg, if (jpg == null) THUMB_NONE else THUMB_PENDING) }
+            }
             jpg?.fill(0)
             bmp?.let { thumbs.put(e.id, it) }
             return bmp
@@ -301,6 +308,7 @@ class VaultStore(val dir: File, master: ByteArray) {
      * the old blob is deleted last. An interruption at any point leaves the old file intact.
      */
     fun upgradeOldFiles() {
+        if (storage !is DirStorage) return
         val todo = _entries.value.filter { !it.folder && needsUpgrade(it) }
         if (todo.isEmpty()) return
         _upgrade.value = 0 to todo.size
@@ -315,23 +323,26 @@ class VaultStore(val dir: File, master: ByteArray) {
         }
     }
 
+    private val dirStorage get() = storage as DirStorage
+
     private fun needsUpgrade(e: Entry): Boolean {
-        if (ChunkedCipher.versionOf(blob(e)) == ChunkedCipher.VERSION_PLAIN.toInt()) return true
-        if (!dir.resolve(e.id).exists()) return false
-        val t = thumbFile(e.id)
-        return !t.exists() || t.length() != SEALED_THUMB_BYTES || blob(e).lastModified() != FIXED_TIME
+        val f = dirStorage.file(e.id)
+        if (ChunkedCipher.versionOf(f) == ChunkedCipher.VERSION_PLAIN.toInt()) return true
+        if (!f.exists()) return false
+        val t = dirStorage.file(thumbName(e.id))
+        return !t.exists() || t.length() != SEALED_THUMB_BYTES || f.lastModified() != FIXED_TIME
     }
 
     private fun upgrade(e: Entry) {
         val oldKey = keyOf(e)
         try {
-            if (ChunkedCipher.versionOf(blob(e)) != ChunkedCipher.VERSION_PLAIN.toInt()) {
+            if (ChunkedCipher.versionOf(dirStorage.file(e.id)) != ChunkedCipher.VERSION_PLAIN.toInt()) {
                 // Already padded: just fix the preview file and the timestamp.
                 if (thumbState(e.id, oldKey) == null) {
                     val jpg = readThumbJpg(e.id, oldKey)
                     if (!closed) writeThumb(e.id, oldKey, jpg, THUMB_PENDING)
                 }
-                stamp(blob(e))
+                dirStorage.stamp(dirStorage.file(e.id))
                 return
             }
             val newId = newId()
@@ -340,7 +351,7 @@ class VaultStore(val dir: File, master: ByteArray) {
                 val before = MessageDigest.getInstance("SHA-256")
                 val size = reader(e).use { old -> writeBlob(newId, newKey) { DigestInputStream(old.inputStream(), before) } }
                 val after = MessageDigest.getInstance("SHA-256")
-                ChunkedCipher.Reader(blob(newId), newKey, size).use { r ->
+                ChunkedCipher.Reader(storage.open(newId), newKey, size).use { r ->
                     val buf = ByteArray(64 * 1024)
                     DigestInputStream(r.inputStream(), after).use { while (it.read(buf) >= 0) Unit }
                 }
@@ -351,13 +362,13 @@ class VaultStore(val dir: File, master: ByteArray) {
                     list.map { if (it.id == e.id) it.copy(id = newId, key = newKeyText) else it }
                 }
                 if (swapped) {
-                    blob(e).delete(); thumbFile(e.id).delete(); thumbs.remove(e.id)
+                    storage.delete(e.id); storage.delete(thumbName(e.id)); thumbs.remove(e.id)
                 } else {
                     // Deleted (or vault locked) meanwhile: keep things exactly as they were.
-                    blob(newId).delete(); thumbFile(newId).delete()
+                    storage.delete(newId); storage.delete(thumbName(newId))
                 }
             } catch (t: Throwable) {
-                blob(newId).delete(); thumbFile(newId).delete()
+                storage.delete(newId); storage.delete(thumbName(newId))
                 throw t
             } finally {
                 newKey.fill(0)
@@ -431,7 +442,10 @@ class VaultStore(val dir: File, master: ByteArray) {
         ids.forEach(::collect)
         val files = all.filter { it.id in doomed && !it.folder }
         if (updateEntries { list -> list.filter { it.id !in doomed } }) {
-            files.forEach { blob(it).delete(); thumbFile(it.id).delete(); thumbs.remove(it.id) }
+            files.forEach {
+                runCatching { storage.delete(it.id); storage.delete(thumbName(it.id)) }
+                thumbs.remove(it.id)
+            }
         }
     }
 
@@ -460,6 +474,8 @@ class VaultStore(val dir: File, master: ByteArray) {
 
     @Synchronized
     fun close() {
+        if (closed) return
+        runCatching { storage.close() }
         closed = true
         indexKey.fill(0); settingsKey.fill(0)
         thumbs.evictAll()
@@ -471,6 +487,8 @@ class VaultStore(val dir: File, master: ByteArray) {
         const val FIXED_TIME = 1_577_836_800_000L
         const val THUMB_BYTES = 48 * 1024
         const val SEALED_THUMB_BYTES = (Aead.NONCE_BYTES + THUMB_BYTES + Aead.TAG_BYTES).toLong()
+        /** Files up to this size are copied (still encrypted) into memory when shared. */
+        private const val SHARE_IN_MEMORY = 64L * 1024 * 1024
         private const val THUMB_PENDING = 0
         private const val THUMB_NONE = -1
     }

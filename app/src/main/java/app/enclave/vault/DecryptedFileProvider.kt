@@ -41,7 +41,7 @@ class DecryptedFileProvider : ContentProvider() {
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
         if (mode != "r") throw SecurityException("read only")
         val sh = share(uri)
-        val reader = ChunkedCipher.Reader(sh.blob, sh.key, sh.size)
+        val reader = ChunkedCipher.Reader(sh.open(), sh.key, sh.size)
         val sm = context!!.getSystemService(StorageManager::class.java)
         return sm.openProxyFileDescriptor(ParcelFileDescriptor.MODE_READ_ONLY, object : ProxyFileDescriptorCallback() {
             override fun onGetSize() = reader.size

@@ -125,8 +125,9 @@ object ChunkedCipher {
      * Random-access reader over an encrypted file. [realSize] is the original length from the
      * index; it's required to strip the padding from version 2 files.
      */
-    class Reader(file: File, private val key: ByteArray, realSize: Long) : Closeable {
-        private val raf = RandomAccessFile(file, "r")
+    class Reader(private val source: BlobSource, private val key: ByteArray, realSize: Long) : Closeable {
+        constructor(file: File, key: ByteArray, realSize: Long) : this(FileBlob(file), key, realSize)
+
         private val prefix: ByteArray
         private val chunks: Int
         val size: Long
@@ -136,11 +137,11 @@ object ChunkedCipher {
 
         init {
             val head = ByteArray(HEADER)
-            raf.readFully(head)
+            source.readFully(0, head)
             val version = head[4]
             require(head.copyOfRange(0, 4).contentEquals(MAGIC) && (version == VERSION_PLAIN || version == VERSION_PADDED)) { "not an Enclave file" }
             prefix = head.copyOfRange(5, HEADER)
-            val ctLen = raf.length() - HEADER
+            val ctLen = source.length - HEADER
             chunks = ((ctLen + SEALED_CHUNK - 1) / SEALED_CHUNK).toInt()
             val stored = ctLen - chunks.toLong() * Aead.TAG_BYTES
             size = if (version == VERSION_PADDED) {
@@ -152,10 +153,9 @@ object ChunkedCipher {
         private fun chunk(index: Int): ByteArray {
             if (index == cachedIndex) return cached
             val start = HEADER + index.toLong() * SEALED_CHUNK
-            val len = minOf(SEALED_CHUNK.toLong(), raf.length() - start).toInt()
+            val len = minOf(SEALED_CHUNK.toLong(), source.length - start).toInt()
             val ct = ByteArray(len)
-            raf.seek(start)
-            raf.readFully(ct)
+            source.readFully(start, ct)
             cached.fill(0)
             cached = Aead.raw(Cipher.DECRYPT_MODE, key, nonce(prefix, index), ct, aad(index, index == chunks - 1))
             cachedIndex = index
@@ -201,7 +201,7 @@ object ChunkedCipher {
 
         override fun close() {
             cached.fill(0)
-            raf.close()
+            source.close()
         }
     }
 }

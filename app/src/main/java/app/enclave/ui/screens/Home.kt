@@ -17,14 +17,18 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.enclave.disguise.Disguise
 import app.enclave.ui.ShareHost
+import app.enclave.ui.toast
 import app.enclave.vault.Entry
 import app.enclave.vault.Session
 
@@ -37,6 +41,12 @@ fun HomeScreen(s: Session.Unlocked) {
     var focus by remember { mutableStateOf<String?>(null) }
 
     ShareHost(s.store)
+    // Anything that couldn't be saved is shown once.
+    val ctx = LocalContext.current
+    val problem by s.store.problem.collectAsStateWithLifecycle()
+    LaunchedEffect(problem) {
+        problem?.let { ctx.toast(it); s.store.problem.value = null }
+    }
 
     Box(Modifier.fillMaxSize()) {
         Scaffold(

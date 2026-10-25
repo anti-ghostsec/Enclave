@@ -1,5 +1,10 @@
-# Enclave's Rust code. The app doesn't use it yet: the vault will move into
-# a deniable container once the app can load native code.
+# Enclave's Rust code: the shared deniable storage crate, and the bridge the
+# app loads to keep its vault inside deniable containers.
 [workspace]
 resolver = "2"
-members = ["deniable"]
+members = ["deniable", "enclave-jni"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

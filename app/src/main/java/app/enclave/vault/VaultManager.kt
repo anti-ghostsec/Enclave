@@ -65,7 +65,11 @@ object VaultManager {
     }
 
     private val headerFile get() = File(app.noBackupFilesDir, "header.bin")
+    /** Vaults in the original format, one directory each. */
     val vaultsRoot get() = File(app.noBackupFilesDir, "vaults")
+
+    /** The deniable containers. */
+    val containersDir get() = File(app.noBackupFilesDir, "store")
 
     fun exists() = headerFile.exists()
 
@@ -137,7 +141,11 @@ object VaultManager {
 
     /**
      * Crypto-shreds everything: the hardware key and the header are destroyed first, which makes
-     * every encrypted file permanently unreadable, then the ciphertext is deleted.
+     * every encrypted file permanently unreadable, then old-format files are deleted.
+     *
+     * The containers are kept: every key that opened anything in them came from the destroyed
+     * header, so they're now nothing but random bytes. A new vault reuses them straight away
+     * instead of spending a minute writing fresh random bytes, which matters most under duress.
      */
     fun wipeAll() {
         HardwareKey.destroy()

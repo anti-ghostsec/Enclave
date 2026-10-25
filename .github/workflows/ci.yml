@@ -21,7 +21,13 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           # The default list includes the retired 'tools' package, which no longer installs.
-          packages: platform-tools
+          # The NDK links the native storage code for phones.
+          packages: platform-tools ndk;29.0.14206865
+      - name: Rust targets
+        run: rustup target add aarch64-linux-android
+      - name: Deniable storage crate tests
+        working-directory: native
+        run: cargo test --release
       - uses: gradle/actions/setup-gradle@v4
       - name: Unit tests
         run: ./gradlew testDebugUnitTest

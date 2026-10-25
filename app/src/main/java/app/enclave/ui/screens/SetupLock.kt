@@ -44,6 +44,7 @@ import app.enclave.vault.VaultActions
 import app.enclave.vault.VaultManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -101,12 +102,15 @@ fun SetupScreen() {
                 if (error != null) return@Button
                 busy = true
                 scope.launch {
-                    val r = withContext(Dispatchers.Default) {
-                        VaultManager.create(pw.toCharArray(), keyfile.secret)
+                    val usesKeyfile = keyfile.secret != null
+                    withContext(Dispatchers.Default) {
+                        Session.open(VaultManager.create(pw.toCharArray(), keyfile.secret))
                     }
-                    Session.open(r)
-                    if (keyfile.secret != null) Session.current?.store?.updateSettings { it.copy(usesKeyfile = true) }
                     keyfile.clear()
+                    // The new vault opens once its storage is ready.
+                    if (usesKeyfile) {
+                        Session.state.first { it != null }?.store?.updateSettings { it.copy(usesKeyfile = true) }
+                    }
                 }
             },
         ) {

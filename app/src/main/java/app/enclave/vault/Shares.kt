@@ -3,7 +3,7 @@ package app.enclave.vault
 import android.content.Context
 import android.net.Uri
 import app.enclave.crypto.Aead
-import java.io.File
+import app.enclave.crypto.BlobSource
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -16,13 +16,13 @@ import java.util.concurrent.ConcurrentHashMap
 object Shares {
     const val LIFETIME_MS = 30 * 60 * 1000L
 
-    class Share(val blob: File, val key: ByteArray, val name: String, val mime: String, val size: Long, val expires: Long)
+    class Share(val open: () -> BlobSource, val key: ByteArray, val name: String, val mime: String, val size: Long, val expires: Long)
 
     private val live = ConcurrentHashMap<String, Share>()
 
     fun create(context: Context, store: VaultStore, e: Entry): Uri {
         val token = Aead.hex(Aead.random(16))
-        live[token] = Share(store.blobOf(e), store.keyBytes(e), e.name, e.mime, e.size, System.currentTimeMillis() + LIFETIME_MS)
+        live[token] = Share(store.shareSource(e), store.keyBytes(e), e.name, e.mime, e.size, System.currentTimeMillis() + LIFETIME_MS)
         return Uri.parse("content://${context.packageName}.files/$token/${Uri.encode(e.name)}")
     }
 

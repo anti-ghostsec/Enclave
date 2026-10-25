@@ -89,6 +89,8 @@ fun SettingsScreen(s: Session.Unlocked, disguiseLabel: String) {
     val ctx = LocalContext.current
     val settings by s.store.settings.collectAsStateWithLifecycle()
     var changePw by remember { mutableStateOf(false) }
+    var fillingDecoy by remember { mutableStateOf<app.enclave.vault.DuressSlot?>(null) }
+    val scope = rememberCoroutineScope()
     var addDuress by remember { mutableStateOf(false) }
     var wipeAll by remember { mutableStateOf(false) }
     var codeDialog by remember { mutableStateOf(false) }
@@ -128,9 +130,20 @@ fun SettingsScreen(s: Session.Unlocked, disguiseLabel: String) {
         settings.duress.forEach { d ->
             ListItem(
                 headlineContent = { Text(d.label.ifBlank { "Duress password" }) },
-                supportingContent = { Text(if (d.action == "decoy") "Opens a decoy vault" else "Silently wipes everything, then opens an empty vault") },
+                supportingContent = {
+                    Text(
+                        when {
+                            d.action != "decoy" -> "Silently wipes everything, then opens an empty vault"
+                            d.master != null -> "Opens a read-only decoy vault. Fill it from here."
+                            else -> "Opens a decoy vault"
+                        },
+                    )
+                },
                 trailingContent = { IconButton(onClick = { VaultActions.removeDuress(d) }) { Icon(Icons.Default.Delete, "Remove") } },
             )
+            if (d.master != null && s.role == app.enclave.vault.Role.MAIN) {
+                TextButton(onClick = { fillingDecoy = d }) { Text("Add harmless files to this decoy") }
+            }
         }
         OutlinedButton(onClick = { addDuress = true }) { Text("Add duress password") }
 
@@ -193,6 +206,22 @@ fun SettingsScreen(s: Session.Unlocked, disguiseLabel: String) {
         Box(Modifier.size(32.dp))
     }
 
+    fillingDecoy?.let { d ->
+        app.enclave.ui.StorageBrowser(app.enclave.ui.BrowseMode.FILES, onDismiss = { fillingDecoy = null }, confirmLabel = "Add to decoy") { files ->
+            fillingDecoy = null
+            scope.launch {
+                val added = withContext(Dispatchers.IO) {
+                    val decoy = app.enclave.vault.openDecoyForFilling(d) ?: return@withContext -1
+                    try {
+                        files.count { f -> runCatching { decoy.importFile(f, null) }.isSuccess }
+                    } finally {
+                        decoy.close()
+                    }
+                }
+                ctx.toast(if (added < 0) "Couldn't open the decoy" else "Added $added file(s) to the decoy")
+            }
+        }
+    }
     if (changePw) ChangePasswordDialog(onDone = { changePw = false })
     if (addDuress) AddDuressDialog(onDone = { addDuress = false })
     if (codeDialog) CalculatorCodeDialog(

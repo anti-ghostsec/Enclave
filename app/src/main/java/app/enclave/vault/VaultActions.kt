@@ -68,10 +68,22 @@ object VaultActions {
         val slot = VaultManager.freeSlot(used) ?: return false
         val master = Aead.random(Aead.KEY_BYTES)
         val role = if (action == "decoy") Role.DECOY else Role.WIPE
+        val main = s.store.storage
+        val segs = Session.segments
+        var decoyKey: String? = null
+        var dir: String? = null
+        if (role == Role.DECOY && main is ContainerStorage && segs != null) {
+            // The decoy gets its own volume in the containers. The real vault keeps its key, so
+            // it can protect the decoy's space and fill it (opened alone, a decoy is read-only).
+            ContainerStorage.create(segs, master, migrated = true).close()
+            main.protect(ContainerStorage.volumeKey(master))
+            decoyKey = java.util.Base64.getEncoder().encodeToString(master)
+        } else if (role == Role.DECOY) {
+            dir = VaultManager.dirFor(master).name
+        }
         VaultManager.setSlot(slot, password, null, role, master)
-        val dir = if (role == Role.DECOY) VaultManager.dirFor(master).name else null
         Aead.wipe(master)
-        s.store.updateSettings { it.copy(duress = it.duress + DuressSlot(slot, action, label, dir)) }
+        s.store.updateSettings { it.copy(duress = it.duress + DuressSlot(slot, action, label, dir, decoyKey)) }
         return true
     }
 
@@ -80,7 +92,29 @@ object VaultActions {
         if (s.role == Role.MAIN && d.slot >= 0) {
             VaultManager.clearSlot(d.slot)
             d.dir?.let { java.io.File(VaultManager.vaultsRoot, it).deleteRecursively() }
+            val segs = Session.segments
+            if (d.master != null && segs != null) {
+                val m = java.util.Base64.getDecoder().decode(d.master)
+                runCatching { ContainerStorage.destroy(segs, m) }
+                m.fill(0)
+            }
         }
         s.store.updateSettings { st -> st.copy(duress = st.duress - d) }
+    }
+}
+
+/** Opens a decoy that lives in the containers, writable, from the real vault's session. */
+fun openDecoyForFilling(d: DuressSlot): VaultStore? {
+    val s = Session.current ?: return null
+    if (s.role != Role.MAIN) return null
+    val segs = Session.segments ?: return null
+    val m = java.util.Base64.getDecoder().decode(d.master ?: return null)
+    return try {
+        val cs = ContainerStorage.open(segs, m, readOnly = false) ?: return null
+        // Count the real vault's space too, so filling the decoy never writes over it.
+        cs.protect(ContainerStorage.volumeKey(s.master))
+        VaultStore(cs, m)
+    } finally {
+        m.fill(0)
     }
 }

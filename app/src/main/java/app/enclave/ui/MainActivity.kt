@@ -21,6 +21,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.enclave.ui.screens.BusyScreen
 import app.enclave.ui.screens.CalculatorScreen
 import app.enclave.ui.screens.HomeScreen
 import app.enclave.ui.screens.LockScreen
@@ -56,6 +57,7 @@ fun EnclaveTheme(content: @Composable () -> Unit) {
 @Composable
 private fun Root() {
     val unlocked by Session.state.collectAsStateWithLifecycle()
+    val busy by Session.busy.collectAsStateWithLifecycle()
     var exists by remember { mutableStateOf(VaultManager.exists()) }
     var facadePassed by remember { mutableStateOf(false) }
 
@@ -65,8 +67,10 @@ private fun Root() {
     }
 
     val u = unlocked
+    val b = busy
     when {
         u != null -> HomeScreen(u)
+        b != null -> BusyScreen(b)
         !exists -> SetupScreen()
         PlainPrefs.calculatorFacade && !facadePassed -> CalculatorScreen(onSecret = { facadePassed = true })
         else -> LockScreen(onWiped = { exists = false })
