@@ -49,7 +49,7 @@ class PickActivity : ComponentActivity() {
                     var viewing by remember { mutableStateOf<Pair<List<Entry>, Int>?>(null) }
                     val s = unlocked
                     var focus by remember { mutableStateOf<String?>(null) }
-                    if (s == null) LockScreen(onWiped = { finish() })
+                    if (s == null) LockScreen()
                     else Box(Modifier.fillMaxSize()) {
                         Box(Modifier.systemBarsPadding()) {
                             FilesScreen(

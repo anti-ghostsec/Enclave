@@ -10,19 +10,15 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * A non-exportable AES-256 key that lives in the phone's secure hardware (StrongBox when
- * available, otherwise the TEE). The vault header is wrapped with it, so a copy of the
- * app's files taken off the phone can't even be brute-forced offline. Deleting this key
- * crypto-shreds the vault instantly.
+ * A non-exportable AES-256 key in the phone's secure hardware (StrongBox when wanted and
+ * available, otherwise the TEE). Whatever it seals can only be opened on this phone.
  */
-object HardwareKey {
-    private const val ALIAS = "enclave_header_v1"
-    private const val STORE = "AndroidKeyStore"
-
+open class KeystoreKey(private val alias: String, private val preferStrongBox: Boolean) {
     private fun keyStore() = KeyStore.getInstance(STORE).apply { load(null) }
 
     private fun getOrCreate(): SecretKey {
-        (keyStore().getKey(ALIAS, null) as? SecretKey)?.let { return it }
+        (keyStore().getKey(alias, null) as? SecretKey)?.let { return it }
+        if (!preferStrongBox) return generate(strongBox = false)
         return try {
             generate(strongBox = true)
         } catch (_: StrongBoxUnavailableException) {
@@ -33,7 +29,7 @@ object HardwareKey {
     }
 
     private fun generate(strongBox: Boolean): SecretKey {
-        val spec = KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+        val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
             .setKeySize(256)
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
@@ -68,6 +64,22 @@ object HardwareKey {
     }
 
     fun destroy() {
-        runCatching { keyStore().deleteEntry(ALIAS) }
+        runCatching { keyStore().deleteEntry(alias) }
+    }
+
+    private companion object {
+        const val STORE = "AndroidKeyStore"
     }
 }
+
+/**
+ * Wraps the vault header, so a copy of the app's files taken off the phone can't even be
+ * brute-forced offline. Deleting this key crypto-shreds the vault instantly.
+ */
+object HardwareKey : KeystoreKey("enclave_header_v1", preferStrongBox = true)
+
+/**
+ * Seals the settings Enclave needs while locked (disguise, lock-out state). Kept through a wipe,
+ * so the app looks exactly the same afterwards. The TEE is enough here, and much faster.
+ */
+object StateKey : KeystoreKey("enclave_state_v1", preferStrongBox = false)

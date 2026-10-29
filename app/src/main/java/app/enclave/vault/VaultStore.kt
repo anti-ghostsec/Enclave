@@ -353,7 +353,11 @@ class VaultStore(val storage: Storage, master: ByteArray) {
                 val after = MessageDigest.getInstance("SHA-256")
                 ChunkedCipher.Reader(storage.open(newId), newKey, size).use { r ->
                     val buf = ByteArray(64 * 1024)
-                    DigestInputStream(r.inputStream(), after).use { while (it.read(buf) >= 0) Unit }
+                    try {
+                        DigestInputStream(r.inputStream(), after).use { while (it.read(buf) >= 0) Unit }
+                    } finally {
+                        buf.fill(0)
+                    }
                 }
                 if (size != e.size || !MessageDigest.isEqual(before.digest(), after.digest())) error("verification failed")
                 writeThumb(newId, newKey, readThumbJpg(e.id, oldKey), THUMB_PENDING)
@@ -387,17 +391,28 @@ class VaultStore(val storage: Storage, master: ByteArray) {
     /** Writes decrypted copies of [ids] (folders recursively) into [target]. Returns the file count. */
     fun exportTo(ids: Collection<String>, target: File, freeName: (File, String) -> File): Int {
         var count = 0
+        val root = target.canonicalFile
+        fun inside(f: File) = f.canonicalFile.toPath().startsWith(root.toPath())
         fun write(e: Entry, into: File) {
             if (e.folder) {
-                val d = freeName(into, e.name).also { it.mkdirs() }
+                val d = freeName(into, e.name)
+                check(inside(d)) { "refused to write outside the chosen folder" }
+                d.mkdirs()
                 _entries.value.filter { it.parent == e.id }.forEach { write(it, d) }
             } else {
-                freeName(into, e.name).outputStream().use { export(e, it) }
+                val f = freeName(into, e.name)
+                check(inside(f)) { "refused to write outside the chosen folder" }
+                f.outputStream().use { export(e, it) }
                 count++
             }
         }
         _entries.value.filter { it.id in ids }.forEach { write(it, target) }
         return count
+    }
+
+    /** Adds entries whose blobs are already in storage (a restored backup) in one save. */
+    fun addRestored(restored: List<Entry>) {
+        if (!updateEntries { it + restored }) throw java.io.IOException(problem.value ?: "Couldn't save")
     }
 
     fun rename(e: Entry, name: String) {
@@ -458,7 +473,7 @@ class VaultStore(val storage: Storage, master: ByteArray) {
         val byHash = HashMap<String, MutableList<Entry>>()
         val buf = ByteArray(64 * 1024)
         candidates.forEachIndexed { i, e ->
-            if (closed) return emptyList()
+            if (closed) return emptyList<List<Entry>>().also { buf.fill(0) }
             runCatching {
                 val md = MessageDigest.getInstance("SHA-256")
                 reader(e).use { r -> r.inputStream().use { input -> while (true) { val n = input.read(buf); if (n < 0) break; md.update(buf, 0, n) } } }

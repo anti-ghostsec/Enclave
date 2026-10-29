@@ -7,9 +7,10 @@ An encrypted file vault for Android. No ads, no internet permission, no analytic
 - **Built-in viewer**: swipe through photos, GIFs, videos and audio. It has pinch zoom, a slideshow and a delete button. Videos start muted and loop. Playback reads straight from the encrypted file.
 - **Safer sharing**: Enclave's own share list shows apps only, never people or recent chats. You can limit it to apps you choose and confirm before anything is sent. Shared links end when the screen turns off, or after 30 minutes.
 - **Other apps can pick from Enclave** (opt-in): browsers and chats can attach a vault file directly.
-- **Password plus an optional keyfile**, **duress passwords** (decoy vault or silent wipe), wipe after N wrong attempts, and exponential lock-out. A decoy opened on its own is read-only, so it can never write over the hidden real vault. You fill it from Settings while the real vault is open.
+- **Password plus an optional keyfile**, **duress passwords** (decoy vault or silent wipe), wipe after N wrong attempts, and exponential lock-out. A decoy opened on its own never writes to the containers, so it can't damage the hidden real vault. Changes made in it work normally but are kept only until it locks. You fill it for real from Settings while the real vault is open. After a wipe for too many wrong passwords the lock screen looks exactly the same and every password is "wrong". To start again, clear Enclave's storage in Android Settings.
 - **Disguise** (off by default): a preset name and icon, a working calculator front, or a custom home-screen icon.
-- Locks when the screen turns off or Enclave is left. Screenshots, recent-apps previews and audio capture are blocked.
+- Locks when the screen turns off or Enclave is left. Screenshots, recent-apps previews and audio capture are blocked. Settings needed while locked (disguise, lock-out) are sealed by a hardware key, not kept in plain preferences. The lock-out uses time since boot, so changing the clock doesn't skip it.
+- **Encrypted backups** (Settings → Backup): one file holding the whole vault, protected only by a password you choose, so it can be restored on another phone. A restore adds everything to the open vault, in a new folder.
 - A built-in folder browser for import, export and keyfiles. It works inside profiles where the system file picker doesn't, such as Motorola Secure Folder, and shows photo and video previews that are made in memory and never saved.
 
 ## Security model
@@ -22,16 +23,18 @@ An encrypted file vault for Android. No ads, no internet permission, no analytic
 | Files | Each file has its own random 256-bit key and is encrypted with chunked AES-256-GCM. The chunk index and a final-chunk flag are in the AAD, which stops chunks being reordered or the file truncated. Names and folders live in an encrypted index. |
 | Deniable containers | Everything lives in equal-sized 4 GiB containers of random-looking bytes ([`native/deniable`](native/deniable)). Each vault is volumes inside them, scattered in 4 KiB blocks encrypted with XChaCha20-Poly1305 and opened by a key derived from the vault's master key. Without a key, nothing says how many vaults there are, how many files, how big they are or when they were written. When space runs low, another container is added, so a vault grows without limit and without copying anything. |
 | Crash safety | New data only ever goes into space nothing saved still uses. The other containers are flushed first, then the root (index, settings and where every file lives) and the home container, which the crate saves atomically. A power cut leaves the previous state intact. |
+| Backups | Argon2id (128 MiB, 4 passes) turns the backup password into a key. The vault's sealed index, settings and every encrypted file and preview are copied byte for byte into 1 MiB AES-256-GCM chunks (the chunk number and a final-chunk flag are in the AAD), padded with Padmé. The file is a salt and a nonce prefix followed by ciphertext: nothing in it is recognisable without the password. It's written under a temporary name and renamed only once complete. |
 
 **Quantum resistance:** Enclave uses only 256-bit symmetric cryptography (AES-256, SHA-2 and Argon2id), with no RSA or ECC anywhere.
 
 ### Known limits
+- A backup doesn't need the phone's security chip: whoever has the file can guess passwords offline as fast as their hardware allows. Use a long, unique backup password, and keep the file somewhere safe.
 - Enclave hasn't been audited by an independent security firm. If being found out could put you in danger, don't rely on it alone.
 - A backup of the raw vault only works on the same phone, because it's bound to that phone's hardware key. Uninstalling Enclave or resetting the phone destroys the vault.
 - The containers' total size is visible: it's a rough upper bound on how much is stored.
 - A decoy made before containers keeps its own directory, which shows a second vault exists. Remove it and add a new decoy to move it inside the containers.
 - On flash storage the controller can keep old copies of blocks that no app can reach.
-- "Open with" and "Share" give the decrypted bytes to the receiving app, which could keep a copy. Exported files are plaintext.
+- "Open with" and "Share" give the decrypted bytes to the receiving app, which could keep a copy. Exported files are plaintext. Links to shared files survive an automatic lock for up to 30 minutes, so a player or upload can finish. They end on "Lock now" or when the screen turns off.
 - Passwords typed into the UI pass through immutable strings that can't be wiped from memory.
 - The folder browser needs Android's "All files access" permission.
 

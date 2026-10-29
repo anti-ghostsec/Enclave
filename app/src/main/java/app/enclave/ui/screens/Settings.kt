@@ -134,7 +134,7 @@ fun SettingsScreen(s: Session.Unlocked, disguiseLabel: String) {
                     Text(
                         when {
                             d.action != "decoy" -> "Silently wipes everything, then opens an empty vault"
-                            d.master != null -> "Opens a read-only decoy vault. Fill it from here."
+                            d.master != null -> "Opens a decoy vault. Fill it from here: changes made inside the decoy itself are kept only until it locks."
                             else -> "Opens a decoy vault"
                         },
                     )
@@ -185,6 +185,8 @@ fun SettingsScreen(s: Session.Unlocked, disguiseLabel: String) {
         CustomShortcut()
 
         OpeningSettings(s)
+
+        BackupSettings(s)
 
         SectionTitle("Auto-lock")
         Text("Enclave always locks when the screen turns off. When you switch to another app:", style = MaterialTheme.typography.bodySmall)

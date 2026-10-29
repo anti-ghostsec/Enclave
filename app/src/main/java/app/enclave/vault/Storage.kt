@@ -119,3 +119,81 @@ class EmptyStorage : Storage {
     override fun commit() {}
     override fun close() {}
 }
+
+/**
+ * A vault that appears fully writable but keeps every change in memory for this session only.
+ * Used for a decoy opened on its own: adding, renaming and deleting all work as anyone checking
+ * would expect, yet nothing is written to the containers, where it could land on the hidden real
+ * vault's blocks. Everything changed is forgotten when the vault locks.
+ */
+class SessionOnlyStorage(private val base: Storage) : Storage {
+    override val readOnly = false
+    private val added = HashMap<String, ByteArray>()
+    private val removed = HashSet<String>()
+    private var index: ByteArray? = null
+    private var settings: ByteArray? = null
+    private var bytes = 0L
+
+    override fun loadIndex(): ByteArray? = synchronized(this) { index?.copyOf() } ?: base.loadIndex()
+    override fun loadSettings(): ByteArray? = synchronized(this) { settings?.copyOf() } ?: base.loadSettings()
+
+    @Synchronized
+    override fun saveIndex(sealed: ByteArray) {
+        index = sealed.copyOf()
+    }
+
+    @Synchronized
+    override fun saveSettings(sealed: ByteArray) {
+        settings = sealed.copyOf()
+    }
+
+    @Synchronized
+    override fun names(): Set<String> = base.names() - removed + added.keys
+
+    @Synchronized
+    override fun size(name: String): Long = added[name]?.size?.toLong() ?: if (name in removed) -1 else base.size(name)
+
+    override fun open(name: String): BlobSource {
+        synchronized(this) {
+            added[name]?.let { return app.enclave.crypto.BytesBlob(it) }
+            if (name in removed) throw IOException("no such file")
+        }
+        return base.open(name)
+    }
+
+    override fun put(name: String, write: (OutputStream) -> Unit) {
+        val out = object : java.io.ByteArrayOutputStream() {
+            override fun write(b: ByteArray, off: Int, len: Int) {
+                if (synchronized(this@SessionOnlyStorage) { bytes } + count + len > LIMIT) throw StorageFullException()
+                super.write(b, off, len)
+            }
+        }
+        write(out)
+        synchronized(this) {
+            added.put(name, out.toByteArray())?.let { bytes -= it.size }
+            bytes += out.size()
+            removed += name
+        }
+    }
+
+    @Synchronized
+    override fun delete(name: String) {
+        added.remove(name)?.let { it.fill(0); bytes -= it.size }
+        removed += name
+    }
+
+    override fun commit() {}
+
+    @Synchronized
+    override fun close() {
+        added.values.forEach { it.fill(0) }
+        added.clear()
+        index?.fill(0); settings?.fill(0)
+        base.close()
+    }
+
+    private companion object {
+        /** Memory this may use before it says storage is full. */
+        const val LIMIT = 192L * 1024 * 1024
+    }
+}

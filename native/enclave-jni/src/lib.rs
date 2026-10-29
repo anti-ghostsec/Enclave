@@ -192,9 +192,11 @@ pub extern "system" fn Java_app_enclave_vault_Native_read(
             let id = inner.id(v)?;
             inner.store()?.read(id, offset as u64, &mut tmp).map_err(describe)?
         };
-        let signed: Vec<i8> = tmp[..n].iter().map(|&b| b as i8).collect();
+        let mut signed: Vec<i8> = tmp[..n].iter().map(|&b| b as i8).collect();
         tmp.iter_mut().for_each(|b| *b = 0);
-        env.set_byte_array_region(&buf, off, &signed).map_err(|e| e.to_string())?;
+        let r = env.set_byte_array_region(&buf, off, &signed).map_err(|e| e.to_string());
+        signed.iter_mut().for_each(|b| *b = 0);
+        r?;
         Ok(n as jint)
     })
 }

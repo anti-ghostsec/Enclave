@@ -25,6 +25,8 @@ class Segments(val dir: File, val segmentBlocks: Long = DEFAULT_BLOCKS) : Closea
 
     init {
         dir.mkdirs()
+        // A container whose making was cut off (power cut, out of space) never got its name.
+        dir.listFiles().orEmpty().filter { it.name.endsWith(".tmp") }.forEach { it.delete() }
         dir.listFiles().orEmpty()
             .mapNotNull { f -> f.name.toIntOrNull()?.let { it to f } }
             .sortedBy { it.first }
@@ -42,7 +44,15 @@ class Segments(val dir: File, val segmentBlocks: Long = DEFAULT_BLOCKS) : Closea
     @Synchronized
     fun add(): Segment {
         val i = (list.maxOfOrNull { it.index } ?: -1) + 1
-        val h = Native.format(File(dir, i.toString()).path, segmentBlocks)
+        val tmp = File(dir, "$i.tmp")
+        tmp.delete()
+        val h = Native.format(tmp.path, segmentBlocks)
+        // The file stays open under its new name; the format has synced everything.
+        if (!tmp.renameTo(File(dir, i.toString()))) {
+            Native.close(h)
+            tmp.delete()
+            throw java.io.IOException("couldn't name the new container")
+        }
         return Segment(i, h, segmentBlocks).also { list += it }
     }
 

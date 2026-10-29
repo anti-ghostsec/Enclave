@@ -7,28 +7,30 @@ object VaultActions {
     sealed interface Outcome {
         data object Opened : Outcome
         data object Wrong : Outcome
-        /** Too many wrong attempts: everything was destroyed. */
-        data object Wiped : Outcome
         data class LockedOut(val ms: Long) : Outcome
     }
 
     fun unlock(password: CharArray, keyfileSecret: ByteArray?): Outcome {
         PlainPrefs.lockoutRemainingMs().let { if (it > 0) return Outcome.LockedOut(it) }
-        // Duress passwords never use a keyfile, so if a keyfile is selected (or remembered) and
-        // nothing matched, try once more without it.
-        val r = VaultManager.unlock(password, keyfileSecret)
-            ?: keyfileSecret?.let { VaultManager.unlock(password, null) }
+        // Duress passwords never use a keyfile, so with a keyfile selected the password is also
+        // tried without it. Both are always tried, so a duress password takes exactly as long as
+        // the real one and the time taken gives nothing away.
+        val withKeyfile = VaultManager.unlock(password, keyfileSecret)
+        val without = if (keyfileSecret != null) VaultManager.unlock(password, null) else null
+        val r = withKeyfile ?: without
+        if (withKeyfile != null) without?.master?.let(Aead::wipe)
         if (r == null) {
-            PlainPrefs.failedAttempts += 1
-            PlainPrefs.lastFailureAt = System.currentTimeMillis()
+            PlainPrefs.recordFailure()
             val max = PlainPrefs.wipeAfterFailures
             if (max > 0 && PlainPrefs.failedAttempts >= max) {
+                // Destroy everything, but look exactly as before: the lock screen stays, and
+                // from now on every password is simply "wrong".
                 wipeEverything()
-                return Outcome.Wiped
+                VaultManager.createUnopenable()
             }
             return Outcome.Wrong
         }
-        PlainPrefs.failedAttempts = 0
+        PlainPrefs.resetFailures()
         when (r.role) {
             Role.MAIN, Role.DECOY -> Session.open(r)
             Role.WIPE -> {
@@ -46,7 +48,7 @@ object VaultActions {
         Shares.clear()
         Session.lock()
         VaultManager.wipeAll()
-        PlainPrefs.failedAttempts = 0
+        PlainPrefs.resetFailures()
     }
 
     fun changePassword(newPassword: CharArray, keyfileSecret: ByteArray?) {

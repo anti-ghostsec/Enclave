@@ -31,6 +31,7 @@ import app.enclave.ui.ShareHost
 import app.enclave.ui.toast
 import app.enclave.vault.Entry
 import app.enclave.vault.Session
+import app.enclave.vault.Shares
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -54,7 +55,7 @@ fun HomeScreen(s: Session.Unlocked) {
                 TopAppBar(
                     title = { Text(listOf("Files", "Settings")[tab]) },
                     actions = {
-                        IconButton(onClick = { Session.lock() }) { Icon(Icons.Default.Lock, "Lock now") }
+                        IconButton(onClick = { Shares.clear(); Session.lock() }) { Icon(Icons.Default.Lock, "Lock now") }
                     },
                 )
             },

@@ -80,7 +80,8 @@ object VaultManager {
 
     private fun write(h: Header) {
         val tmp = File(headerFile.path + ".tmp")
-        tmp.writeBytes(HardwareKey.seal(h.serialize()))
+        // On the disk before it replaces the old header: it holds the only copy of the keys.
+        java.io.FileOutputStream(tmp).use { it.write(HardwareKey.seal(h.serialize())); it.fd.sync() }
         if (!tmp.renameTo(headerFile)) {
             headerFile.delete()
             tmp.renameTo(headerFile)
@@ -102,6 +103,14 @@ object VaultManager {
         Aead.wipe(kek)
         write(h)
         return UnlockResult(Role.MAIN, slot, master)
+    }
+
+    /**
+     * A header that no password opens: what's left after a wipe for too many wrong passwords, so
+     * the lock screen stays exactly as it was instead of showing that something was destroyed.
+     */
+    fun createUnopenable() {
+        write(Header(Kdf.DEFAULT, Aead.random(32), Array(Header.SLOT_COUNT) { Header.randomSlot() }))
     }
 
     /** Runs Argon2id once, then tries every slot. Returns null for a wrong password/keyfile. */

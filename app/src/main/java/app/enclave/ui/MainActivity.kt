@@ -73,6 +73,6 @@ private fun Root() {
         b != null -> BusyScreen(b)
         !exists -> SetupScreen()
         PlainPrefs.calculatorFacade && !facadePassed -> CalculatorScreen(onSecret = { facadePassed = true })
-        else -> LockScreen(onWiped = { exists = false })
+        else -> LockScreen()
     }
 }

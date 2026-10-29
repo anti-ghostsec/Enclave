@@ -244,8 +244,22 @@ private fun BrowsePreview(f: File, thumbs: LruCache<String, Bitmap>) {
     }
 }
 
-/** Picks a name like "photo (2).jpg" that doesn't exist yet in [dir]. */
-fun freeName(dir: File, name: String): File {
+/**
+ * A name that's safe as one file name: no folder separators, no "." or "..", no control
+ * characters. Vault names can come from other apps, so they're never trusted as paths.
+ */
+fun safeFileName(name: String): String {
+    val last = name.replace('\\', '/').substringAfterLast('/')
+    val clean = last.filter { it >= ' ' && it != '\u007f' }.trim()
+    return if (clean.isEmpty() || clean == "." || clean == "..") "file" else clean
+}
+
+/**
+ * Picks a name like "photo (2).jpg" that doesn't exist yet in [dir]. The result is always
+ * directly inside [dir].
+ */
+fun freeName(dir: File, rawName: String): File {
+    val name = safeFileName(rawName)
     var f = File(dir, name)
     if (!f.exists()) return f
     val base = name.substringBeforeLast('.', name)

@@ -120,7 +120,7 @@ fun SetupScreen() {
 }
 
 @Composable
-fun LockScreen(onWiped: () -> Unit) {
+fun LockScreen() {
     var pw by remember { mutableStateOf("") }
     val keyfile = remember { KeyfileState() }
     var busy by remember { mutableStateOf(false) }
@@ -154,7 +154,6 @@ fun LockScreen(onWiped: () -> Unit) {
                             pw = ""; keyfile.clear()
                         }
                         VaultActions.Outcome.Wrong -> error = "Wrong password or keyfile"
-                        VaultActions.Outcome.Wiped -> onWiped()
                         is VaultActions.Outcome.LockedOut -> lockout = outcome.ms
                     }
                 }

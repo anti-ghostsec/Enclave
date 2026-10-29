@@ -28,14 +28,30 @@ object Migration {
     ) {
         val names = old.names().sorted()
         val total = names.sumOf { old.size(it).coerceAtLeast(0) }
-        var done = 0L
-        var sinceCommit = 0L
         val buf = ByteArray(256 * 1024)
 
         fun stopIfAsked() {
             if (cancelled()) throw Cancelled()
         }
 
+        try {
+            copyAndCheck(old, target, names, total, buf, progress, ::stopIfAsked)
+        } finally {
+            buf.fill(0)
+        }
+    }
+
+    private fun copyAndCheck(
+        old: DirStorage,
+        target: ContainerStorage,
+        names: List<String>,
+        total: Long,
+        buf: ByteArray,
+        progress: (Progress) -> Unit,
+        stopIfAsked: () -> Unit,
+    ) {
+        var done = 0L
+        var sinceCommit = 0L
         // 1. Copy every blob that isn't already there (from an earlier, interrupted move).
         progress(Progress(Stage.Copying, 0, total))
         for (name in names) {
@@ -83,7 +99,6 @@ object Migration {
 
         // 3. Only now does the container become the vault.
         target.finishMigration()
-        buf.fill(0)
     }
 
     private fun same(a: Storage, b: Storage, name: String, buf: ByteArray): Boolean {

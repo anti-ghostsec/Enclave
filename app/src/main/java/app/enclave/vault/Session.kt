@@ -43,9 +43,10 @@ object Session {
 
         if (r.role != Role.MAIN) {
             // A decoy. An old-format one keeps its own directory and works as before. One in the
-            // containers opens read-only: writing with only it unlocked could overwrite the
-            // hidden real vault, which this session can't see.
-            val storage = old ?: ContainerStorage.open(segs, r.master, readOnly = true) ?: EmptyStorage()
+            // containers never writes to them: with only it unlocked, a write could land on the
+            // hidden real vault, which this session can't see. Changes look like they work and
+            // are kept in memory until it locks, so nothing gives the decoy away.
+            val storage = old ?: SessionOnlyStorage(ContainerStorage.open(segs, r.master, readOnly = true) ?: EmptyStorage())
             ready(r, storage)
             return
         }

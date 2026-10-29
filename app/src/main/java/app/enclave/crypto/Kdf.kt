@@ -45,12 +45,16 @@ object Kdf {
     fun keyfileSecret(input: InputStream): ByteArray {
         val md = MessageDigest.getInstance("SHA-512")
         val buf = ByteArray(64 * 1024)
-        input.use {
-            while (true) {
-                val n = it.read(buf)
-                if (n < 0) break
-                md.update(buf, 0, n)
+        try {
+            input.use {
+                while (true) {
+                    val n = it.read(buf)
+                    if (n < 0) break
+                    md.update(buf, 0, n)
+                }
             }
+        } finally {
+            buf.fill(0)
         }
         return md.digest()
     }
