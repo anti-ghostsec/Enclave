@@ -139,7 +139,7 @@ class SessionOnlyStorage(private val base: Storage, private val scratch: File? =
         val size: Long get() = bytes?.size?.toLong() ?: file!!.length()
         fun discard() {
             bytes?.fill(0)
-            file?.delete()
+            file?.let { it.delete(); it.parentFile?.setLastModified(VaultStore.FIXED_TIME) }
         }
     }
 
@@ -209,6 +209,7 @@ class SessionOnlyStorage(private val base: Storage, private val scratch: File? =
             try {
                 scratch!!.mkdirs()
                 val f = File(scratch, synchronized(this@SessionOnlyStorage) { files++ }.toString())
+                stampScratch()
                 file = f
                 val o = f.outputStream().buffered(256 * 1024)
                 out = o
@@ -265,12 +266,16 @@ class SessionOnlyStorage(private val base: Storage, private val scratch: File? =
 
     override fun commit() {}
 
+    private fun stampScratch() { scratch?.setLastModified(VaultStore.FIXED_TIME) }
+
     @Synchronized
     override fun close() {
         added.values.forEach { it.discard() }
         added.clear()
         inMemory = 0
-        scratch?.deleteRecursively()
+        // The folder stays, empty: it is there whichever vault is open.
+        scratch?.listFiles()?.forEach { it.deleteRecursively() }
+        stampScratch()
         index?.fill(0); settings?.fill(0)
         base.close()
     }

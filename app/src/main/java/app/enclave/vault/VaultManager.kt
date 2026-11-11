@@ -62,8 +62,11 @@ object VaultManager {
 
     fun init(context: Context) {
         app = context.applicationContext
-        // Left behind if Enclave was killed while a decoy was open.
-        scratchDir.deleteRecursively()
+        // Left behind if Enclave was killed while a decoy was open. The folder itself is always
+        // there, empty, so its presence says nothing about which vault is or was open.
+        scratchDir.listFiles()?.forEach { it.deleteRecursively() }
+        scratchDir.mkdirs()
+        scratchDir.setLastModified(VaultStore.FIXED_TIME)
     }
 
     private val headerFile get() = File(app.noBackupFilesDir, "header.bin")
@@ -125,8 +128,8 @@ object VaultManager {
      * Runs Argon2id once, then tries every slot. Returns null for a wrong password/keyfile.
      *
      * Every slot is always tried. Should one password ever open two slots, the real vault wins:
-     * a decoy can be given any password from inside it (it can't know which ones are taken), and
-     * that must never put the real vault out of reach.
+     * a decoy made by an earlier version could be given any password from inside it, and that
+     * must never put the real vault out of reach.
      */
     fun unlock(password: CharArray, keyfileSecret: ByteArray?): UnlockResult? {
         val h = read()
@@ -178,6 +181,16 @@ object VaultManager {
         val kek = Kdf.derive(password, keyfileSecret, h.salt, h.params)
         sealSlot(h, slot, kek, role, master)
         Aead.wipe(kek)
+        write(h)
+    }
+
+    /**
+     * What a decoy session does instead of [setSlot]: the same work, and the header is written
+     * again, sealed afresh, so the file changes as it would. No slot is touched.
+     */
+    fun pretendToSetSlot(password: CharArray, keyfileSecret: ByteArray?) {
+        val h = read()
+        Aead.wipe(Kdf.derive(password, keyfileSecret, h.salt, h.params))
         write(h)
     }
 

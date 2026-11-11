@@ -256,8 +256,13 @@ object Backup {
      * Adds everything in the backup at [file] to [store], inside a new folder named [folderName]:
      * files keep their own keys and bytes, and get new ids so nothing collides. Returns the number
      * of files restored. If it fails part-way, nothing is added to the vault's list.
+     *
+     * [holdsMasterKey] is called for a backup made by 0.4.0, which the user should replace.
      */
-    fun restore(file: File, password: CharArray, store: VaultStore, folderName: String, progress: (Long, Long) -> Unit): Int {
+    fun restore(
+        file: File, password: CharArray, store: VaultStore, folderName: String,
+        holdsMasterKey: () -> Unit = {}, progress: (Long, Long) -> Unit,
+    ): Int {
         val input = file.inputStream().buffered(1 shl 20)
         val salt = ByteArray(SALT); val prefix = ByteArray(PREFIX)
         try {
@@ -273,6 +278,7 @@ object Backup {
             val manifest = json.decodeFromString<Manifest>(String(manifestBytes))
             manifestBytes.fill(0)
             if (manifest.v !in 1..VERSION) throw IOException("this backup was made by a newer version of Enclave")
+            if (manifest.v == 1) holdsMasterKey()
             val master = java.util.Base64.getDecoder().decode(manifest.master)
             var read = 8L + 4 + manifestBytes.size
             fun readItem(size: Long): ByteArray = ByteArray(size.toInt()).also { data.readFully(it); read += size }

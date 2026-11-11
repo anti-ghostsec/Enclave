@@ -120,7 +120,9 @@ class BackupTest {
         val backup = File(tmp(), "old.bin")
         Backup.write(store, master, pw, backup) { _, _ -> }
         val target = VaultStore(tmp(), Aead.random(32))
-        assertEquals(3, Backup.restore(backup, pw, target, "Restored") { _, _ -> })
+        var warned = false
+        assertEquals(3, Backup.restore(backup, pw, target, "Restored", { warned = true }) { _, _ -> })
+        assertTrue(warned)
         val restored = contents(target)
         files.forEach { (name, bytes) -> assertArrayEquals(name, bytes, restored[name]) }
         // The vault restored into keeps its own settings.
@@ -142,7 +144,7 @@ class BackupTest {
         Backup.create(store, pw, fresh) { _, _ -> }
         val target = VaultStore(tmp(), Aead.random(32))
         target.updateSettings { it.copy(slideshowSeconds = 15) }
-        assertEquals(3, Backup.restore(fresh, pw, target, "R") { _, _ -> })
+        assertEquals(3, Backup.restore(fresh, pw, target, "R", { throw AssertionError("not an old backup") }) { _, _ -> })
         assertTrue(target.settings.value.duress.isEmpty())
         assertEquals(15, target.settings.value.slideshowSeconds)
         target.close(); store.close()

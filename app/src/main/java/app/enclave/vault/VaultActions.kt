@@ -54,22 +54,46 @@ object VaultActions {
     /**
      * Whether this session can tell that [password] is in use already.
      *
-     * The real vault knows every slot. A decoy knows only its own and the duress passwords added
-     * in this session, and checks nothing else: an unlocked decoy must not be a way to try
+     * The real vault knows every slot. A decoy knows only its own (or the one it was
+     * given in this session) and the duress passwords added in this session, and checks nothing else: an unlocked decoy must not be a way to try
      * passwords against the real vault, and must answer exactly as a real vault with the same
      * passwords would. One Argon2id run either way, so the time taken is the same too.
      */
-    private fun taken(s: Session.Unlocked, password: CharArray, keyfileSecret: ByteArray?): Pair<Boolean, VaultManager.Probe> {
+    private fun taken(s: Session.Unlocked, password: CharArray, keyfileSecret: ByteArray?): Taken {
         val known = if (s.role == Role.MAIN) (0 until Header.SLOT_COUNT).toList() else listOf(s.slot)
         val p = VaultManager.probe(password, keyfileSecret, known)
-        val other = (p.opens - s.slot).isNotEmpty() || synchronized(s.sessionDuress) { s.sessionDuress.any { it.second.contentEquals(p.tag) } }
-        return other to p
+        return synchronized(s.sessionDuress) {
+            val mine = s.sessionPassword
+            Taken(
+                other = (p.opens - s.slot).isNotEmpty() || s.sessionDuress.any { it.second.contentEquals(p.tag) },
+                own = if (mine != null) mine.contentEquals(p.tag) else s.slot in p.opens,
+                tag = p.tag,
+            )
+        }
     }
+
+    /** [other]: another password here is the same. [own]: it's this vault's current password. */
+    private class Taken(val other: Boolean, val own: Boolean, val tag: ByteArray)
 
     /** Changes this vault's password. Returns false if another password here is the same. */
     fun changePassword(newPassword: CharArray, keyfileSecret: ByteArray?): Boolean {
         val s = Session.current ?: return true
-        if (taken(s, newPassword, keyfileSecret).first) return false
+        val t = taken(s, newPassword, keyfileSecret)
+        if (t.other) return false
+        if (s.role != Role.MAIN) {
+            // A decoy never writes a slot. If it did, whoever holds its password could set it to
+            // a guess at the real one, lock, and type the guess: the real vault opening would
+            // confirm it, and every try would count as a good unlock, never as a failure. So the
+            // new password lasts until the decoy locks, like everything else changed in it, and
+            // a guess has to be made at the lock screen, where wrong ones are counted.
+            VaultManager.pretendToSetSlot(newPassword, keyfileSecret)
+            synchronized(s.sessionDuress) {
+                s.sessionPassword?.fill(0)
+                s.sessionPassword = t.tag
+            }
+            s.store.updateSettings { it.copy(usesKeyfile = keyfileSecret != null) }
+            return true
+        }
         VaultManager.setSlot(s.slot, newPassword, keyfileSecret, s.role, s.master)
         s.store.updateSettings { it.copy(usesKeyfile = keyfileSecret != null) }
         return true
@@ -80,17 +104,16 @@ object VaultActions {
     /** Adds a duress password. */
     fun addDuress(password: CharArray, action: String, label: String): Added {
         val s = Session.current ?: return Added.NO_SLOTS
-        val (other, probe) = taken(s, password, null)
-        if (other || s.slot in probe.opens) return Added.IN_USE
+        val t = taken(s, password, null)
+        if (t.other || t.own) return Added.IN_USE
         if (s.role != Role.MAIN) {
             // A decoy vault doesn't know where the real slots are, so it must never write the
             // header. It records the entry so the decoy still looks like a fully working vault,
             // with the same limit, for as long as it stays unlocked.
             if (s.store.settings.value.duress.size >= Header.SLOT_COUNT - 1) return Added.NO_SLOTS
             val entry = DuressSlot(-1, action, label)
-            // The same work a real vault does to write the slot, so this takes as long.
-            VaultManager.probe(password, null, emptyList())
-            synchronized(s.sessionDuress) { s.sessionDuress += entry to probe.tag }
+            VaultManager.pretendToSetSlot(password, null)
+            synchronized(s.sessionDuress) { s.sessionDuress += entry to t.tag }
             s.store.updateSettings { it.copy(duress = it.duress + entry) }
             return Added.OK
         }

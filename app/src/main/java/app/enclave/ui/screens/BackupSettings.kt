@@ -96,8 +96,12 @@ fun BackupSettings(s: Session.Unlocked) {
             onOk = { pw ->
                 val folder = "Restored " + SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
                 run("Restoring backup") { progress ->
-                    val n = Backup.restore(st.file, pw.toCharArray(), s.store, folder, progress)
-                    "Restored $n file(s) into “$folder”"
+                    var old = false
+                    val n = Backup.restore(st.file, pw.toCharArray(), s.store, folder, { old = true }, progress)
+                    "Restored $n file(s) into “$folder”" + if (old) {
+                        "\n\nThis backup was made by an earlier version and also holds the key to the vault " +
+                            "it came from. Make a new backup now, then delete this file and any copies of it."
+                    } else ""
                 }
             },
         )

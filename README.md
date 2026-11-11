@@ -37,7 +37,9 @@ An encrypted file vault for Android. No ads, no internet permission, no analytic
 - "Open with" and "Share" give the decrypted bytes to the receiving app, which could keep a copy. Exported files are plaintext. Links to shared files survive an automatic lock for up to 30 minutes, so a player or upload can finish. They end on "Lock now" or when the screen turns off. A file over 64 MB is read straight from the open vault, so while another app has one the vault stays unlocked until that link ends (30 minutes at most) instead of locking after the usual delay.
 - Backups made by 0.4.0 also hold the vault's master key and settings. Whoever has one and its password can open a later copy of the same vault, so make a new backup and delete those.
 - With two copies of the phone's storage taken at different times, the containers show that something was written in between. A decoy opened on its own never writes to them, so it can't account for that.
-- A duress password added from inside a decoy is forgotten when it locks, like everything else changed there.
+- A duress password added from inside a decoy, or a new password given to the decoy itself, is forgotten when it locks, like everything else changed there. A decoy never writes a password to the header, so it can't be used to test guesses at the real one.
+- Large files added to a decoy opened on its own are kept, encrypted, in a scratch folder until it locks. The folder is always there, but someone who can read Enclave's private files while it's unlocked would see files in it. That takes root on a running phone, which can read the keys from memory anyway.
+- Restoring a backup made by 0.4.0 shows a reminder to replace it.
 - The hardware key can be used while the phone itself is locked (by code already running as Enclave), not only while it's unlocked.
 - Passwords typed into the UI pass through immutable strings that can't be wiped from memory.
 - The folder browser needs Android's "All files access" permission.

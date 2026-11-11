@@ -14,6 +14,12 @@ object Session {
          * exist only here: a decoy can't write the header's slots (see [VaultActions.addDuress]).
          */
         val sessionDuress = mutableListOf<Pair<DuressSlot, ByteArray>>()
+
+        /**
+         * A tag of the password a decoy session was asked to change to, which it also keeps only
+         * here (see [VaultActions.changePassword]). Guarded by [sessionDuress].
+         */
+        var sessionPassword: ByteArray? = null
     }
 
     /** Shown while a vault is being prepared or moved into the containers. */
@@ -180,7 +186,12 @@ object Session {
         _busy.value = null
         s?.store?.close()
         s?.master?.let(Aead::wipe)
-        s?.sessionDuress?.let { list -> synchronized(list) { list.forEach { it.second.fill(0) }; list.clear() } }
+        s?.sessionDuress?.let { list ->
+            synchronized(list) {
+                list.forEach { it.second.fill(0) }; list.clear()
+                s.sessionPassword?.fill(0); s.sessionPassword = null
+            }
+        }
         // A move in progress closes the containers itself once it has stopped.
         if (worker == null) closeSegments()
     }

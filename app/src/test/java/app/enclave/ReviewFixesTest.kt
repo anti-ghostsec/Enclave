@@ -53,7 +53,9 @@ class ReviewFixesTest {
             assertEquals(1, scratch.listFiles()!!.size)
             store.close()
         }
-        assertFalse(scratch.exists())
+        // The folder stays, empty and undated, as it is whichever vault is open.
+        assertTrue(scratch.listFiles()!!.isEmpty())
+        assertEquals(VaultStore.FIXED_TIME, scratch.lastModified())
         // And the containers never heard of any of it.
         Segments(dir, 1024).use { s ->
             val store = VaultStore(ContainerStorage.open(s, decoy, readOnly = true)!!, decoy.copyOf())
