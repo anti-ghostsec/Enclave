@@ -19,6 +19,8 @@ import app.enclave.vault.PlainPrefs
 object Disguise {
     data class Preset(val id: String, val label: String, val icon: Int, val fg: Int, val bg: Int) {
         val alias get() = "app.enclave.alias.$id"
+        /** The entry other apps see when choosing a file, under this disguise's name and icon. */
+        val pickAlias get() = "app.enclave.pick.$id"
     }
 
     val presets = listOf(
@@ -43,6 +45,40 @@ object Disguise {
                 PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP)
         }
         PlainPrefs.disguise = preset.id
+        // The entry other apps pick files from wears the same disguise.
+        if (pickerEnabled(c)) setPickerEnabled(c, true)
+    }
+
+    private fun enabled(c: Context, name: String) =
+        c.packageManager.getComponentEnabledSetting(ComponentName(c.packageName, name)) == PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+
+    private fun setEnabled(c: Context, name: String, on: Boolean) = c.packageManager.setComponentEnabledSetting(
+        ComponentName(c.packageName, name),
+        if (on) PackageManager.COMPONENT_ENABLED_STATE_ENABLED else PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+        PackageManager.DONT_KILL_APP,
+    )
+
+    /** Whether other apps can pick files from Enclave (Settings → Other apps). */
+    fun pickerEnabled(c: Context) = presets.any { enabled(c, it.pickAlias) }
+
+    /** Turns picking on under the current disguise's name and icon, or off altogether. */
+    fun setPickerEnabled(c: Context, on: Boolean) {
+        val now = current()
+        if (on) setEnabled(c, now.pickAlias, true)
+        presets.filter { !on || it != now }.forEach { if (enabled(c, it.pickAlias)) setEnabled(c, it.pickAlias, false) }
+    }
+
+    /**
+     * Earlier versions turned the picker itself on and off, and it always appeared as "Enclave".
+     * If it was on, it's now on under the current disguise.
+     */
+    fun moveOldPicker(c: Context) {
+        val old = ComponentName(c, app.enclave.ui.PickActivity::class.java)
+        val state = c.packageManager.getComponentEnabledSetting(old)
+        if (state == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT) return
+        if (state == PackageManager.COMPONENT_ENABLED_STATE_ENABLED) setPickerEnabled(c, true)
+        // Back to the manifest's setting (on), or one switched off earlier would stay unreachable.
+        c.packageManager.setComponentEnabledSetting(old, PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, PackageManager.DONT_KILL_APP)
     }
 
     fun canPinShortcut(c: Context) = ShortcutManagerCompat.isRequestPinShortcutSupported(c)

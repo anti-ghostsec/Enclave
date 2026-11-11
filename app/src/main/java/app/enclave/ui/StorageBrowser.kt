@@ -189,7 +189,7 @@ fun StorageBrowser(
         AlertDialog(
             onDismissRequest = { newFolder = false },
             title = { Text("New folder") },
-            text = { OutlinedTextField(name, { name = it }, singleLine = true) },
+            text = { OutlinedTextField(name, { name = it }, singleLine = true, keyboardOptions = PrivateKeyboard) },
             confirmButton = {
                 TextButton(enabled = name.isNotBlank(), onClick = {
                     val f = File(dir, name.trim())

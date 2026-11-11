@@ -62,6 +62,8 @@ object VaultManager {
 
     fun init(context: Context) {
         app = context.applicationContext
+        // Left behind if Enclave was killed while a decoy was open.
+        scratchDir.deleteRecursively()
     }
 
     private val headerFile get() = File(app.noBackupFilesDir, "header.bin")
@@ -70,6 +72,12 @@ object VaultManager {
 
     /** The deniable containers. */
     val containersDir get() = File(app.noBackupFilesDir, "store")
+
+    /**
+     * Where a decoy opened on its own keeps what's added to it, until it locks. Only ever holds
+     * encrypted blobs whose keys are in memory, so whatever is left of it is unreadable.
+     */
+    val scratchDir get() = File(app.noBackupFilesDir, "scratch")
 
     fun exists() = headerFile.exists()
 
@@ -113,19 +121,52 @@ object VaultManager {
         write(Header(Kdf.DEFAULT, Aead.random(32), Array(Header.SLOT_COUNT) { Header.randomSlot() }))
     }
 
-    /** Runs Argon2id once, then tries every slot. Returns null for a wrong password/keyfile. */
+    /**
+     * Runs Argon2id once, then tries every slot. Returns null for a wrong password/keyfile.
+     *
+     * Every slot is always tried. Should one password ever open two slots, the real vault wins:
+     * a decoy can be given any password from inside it (it can't know which ones are taken), and
+     * that must never put the real vault out of reach.
+     */
     fun unlock(password: CharArray, keyfileSecret: ByteArray?): UnlockResult? {
         val h = read()
         val kek = Kdf.derive(password, keyfileSecret, h.salt, h.params)
         try {
+            var best: UnlockResult? = null
             for (i in 0 until Header.SLOT_COUNT) {
                 val plain = runCatching { Aead.open(kek, h.slots[i], h.slotAad(i)) }.getOrNull() ?: continue
-                val role = Role.of(plain[0]) ?: continue
+                val role = Role.of(plain[0])
                 val master = plain.copyOfRange(1, plain.size)
                 plain.fill(0)
-                return UnlockResult(role, i, master)
+                if (role != null && (best == null || (role == Role.MAIN && best.role != Role.MAIN))) {
+                    best?.master?.let(Aead::wipe)
+                    best = UnlockResult(role, i, master)
+                } else Aead.wipe(master)
             }
-            return null
+            return best
+        } finally {
+            Aead.wipe(kek)
+        }
+    }
+
+    /** What [probe] found: which of the slots asked about the password opens, and a tag for it. */
+    class Probe(val opens: Set<Int>, val tag: ByteArray)
+
+    /**
+     * Checks a password against [slots] only, and against no others. A session may only ask about
+     * slots it already knows: asking about the rest would let whoever holds a decoy password test
+     * guesses at the real one, with no lock-out, and learn that it exists.
+     *
+     * The tag recognises the same password again later without keeping it.
+     */
+    fun probe(password: CharArray, keyfileSecret: ByteArray?, slots: Collection<Int>): Probe {
+        val h = read()
+        val kek = Kdf.derive(password, keyfileSecret, h.salt, h.params)
+        try {
+            val opens = slots.filter { i ->
+                runCatching { Aead.open(kek, h.slots[i], h.slotAad(i)) }.getOrNull()?.also { it.fill(0) } != null
+            }
+            return Probe(opens.toSet(), Aead.sha256(kek, "password tag".toByteArray()))
         } finally {
             Aead.wipe(kek)
         }

@@ -1,10 +1,8 @@
 package app.enclave.ui
 
 import android.content.ClipData
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -21,6 +19,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.enclave.disguise.Disguise
 import app.enclave.ui.screens.FilesScreen
 import app.enclave.ui.screens.LockScreen
 import app.enclave.ui.screens.PickRequest
@@ -34,6 +33,9 @@ import app.enclave.vault.VaultManager
  * Lets another app (a browser, a forum, a chat) pick a file straight from the vault, like it
  * would from Files. Off unless turned on in Settings. Enclave must be unlocked first; the app
  * only gets the files you tap, through links that end when the screen turns off.
+ *
+ * Other apps reach it through one alias per disguise (see the manifest), so in their list of
+ * places to pick from it carries the disguise's name and icon, never "Enclave" under a disguise.
  */
 class PickActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -44,7 +46,7 @@ class PickActivity : ComponentActivity() {
         val multiple = intent.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
         setContent {
             EnclaveTheme {
-                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) { NoKeyboardLearning {
                     val unlocked by Session.state.collectAsStateWithLifecycle()
                     var viewing by remember { mutableStateOf<Pair<List<Entry>, Int>?>(null) }
                     val s = unlocked
@@ -64,7 +66,7 @@ class PickActivity : ComponentActivity() {
                             ViewerScreen(s.store, items, start, onClose = { last -> focus = last?.id; viewing = null })
                         }
                     }
-                }
+                } }
             }
         }
     }
@@ -81,13 +83,8 @@ class PickActivity : ComponentActivity() {
     }
 
     companion object {
-        fun isEnabled(c: Context) = c.packageManager.getComponentEnabledSetting(ComponentName(c, PickActivity::class.java)) ==
-            PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+        fun isEnabled(c: Context) = Disguise.pickerEnabled(c)
 
-        fun setEnabled(c: Context, on: Boolean) = c.packageManager.setComponentEnabledSetting(
-            ComponentName(c, PickActivity::class.java),
-            if (on) PackageManager.COMPONENT_ENABLED_STATE_ENABLED else PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-            PackageManager.DONT_KILL_APP,
-        )
+        fun setEnabled(c: Context, on: Boolean) = Disguise.setPickerEnabled(c, on)
     }
 }

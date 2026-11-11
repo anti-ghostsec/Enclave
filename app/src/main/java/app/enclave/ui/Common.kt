@@ -45,9 +45,34 @@ import app.enclave.vault.Session
 
 fun Context.toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
 
-/** Call right before opening a system picker so auto-lock doesn't fire while it's open. */
-fun leavingOnPurpose() {
-    Session.awayByChoice = true
+/** Call right before opening a system picker, so auto-lock allows a few minutes to choose. */
+fun leavingOnPurpose() = Session.leaving(Session.Away.PICKER)
+
+/**
+ * For names and search words: asks the keyboard not to suggest, correct or learn what's typed,
+ * so file names don't end up in its dictionary.
+ */
+val PrivateKeyboard = KeyboardOptions(autoCorrectEnabled = false)
+
+/**
+ * Tells the keyboard not to learn from anything typed inside [content], whichever field it is:
+ * every text field in Enclave holds a password, a file name or a search for one.
+ */
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@Composable
+fun NoKeyboardLearning(content: @Composable () -> Unit) {
+    androidx.compose.ui.platform.InterceptPlatformTextInput(
+        interceptor = { request, next ->
+            next.startInputMethod(
+                androidx.compose.ui.platform.PlatformTextInputMethodRequest { info ->
+                    request.createInputConnection(info).also {
+                        info.imeOptions = info.imeOptions or android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+                    }
+                },
+            )
+        },
+        content = content,
+    )
 }
 
 @Composable
@@ -137,7 +162,8 @@ fun KeyfileRow(state: KeyfileState, allowCreate: Boolean) {
             if (state.secret != null) {
                 TextButton(onClick = { state.clear() }) { Text("Remove") }
             } else if (allowCreate) {
-                TextButton(onClick = { leavingOnPurpose(); create.launch("enclave.key") }) { Text("Create new") }
+                // A name that says nothing about which app the file is for.
+                TextButton(onClick = { leavingOnPurpose(); create.launch("data.bin") }) { Text("Create new") }
             }
         }
     }
@@ -160,9 +186,9 @@ fun SectionTitle(text: String) {
 }
 
 fun Context.openExternally(intent: Intent) {
-    leavingOnPurpose()
+    Session.leaving(Session.Away.HANDOFF)
     runCatching { startActivity(intent) }.onFailure {
-        Session.awayByChoice = false
+        Session.cameBack()
         toast("No app can open this")
     }
 }

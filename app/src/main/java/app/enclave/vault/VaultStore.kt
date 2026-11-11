@@ -208,12 +208,15 @@ class VaultStore(val storage: Storage, master: ByteArray) {
             val f = st.file(e.id)
             return { FileBlob(f) }
         }
-        if (e.size <= SHARE_IN_MEMORY) {
+        if (sharesOutliveLock(e)) {
             val bytes = st.open(e.id).use { it.readAll() }
             return { BytesBlob(bytes) }
         }
         return { st.open(e.id) }
     }
+
+    /** Whether a share of this file keeps working once the vault has locked. */
+    fun sharesOutliveLock(e: Entry) = storage is DirStorage || e.size <= SHARE_IN_MEMORY
 
     /** A copy of one file's key, for [Shares]. */
     fun keyBytes(e: Entry) = keyOf(e)

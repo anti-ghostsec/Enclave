@@ -25,9 +25,15 @@ import javax.crypto.Cipher
  * The file is a 32-byte salt, an 8-byte nonce prefix, then 1 MiB chunks sealed with AES-256-GCM
  * (nonce = prefix || chunk number; the chunk number and a final-chunk flag are in the AAD, so
  * chunks can't be reordered and the file can't be cut short). Inside: the true length, a manifest
- * (the vault's master key and a list of items), the vault's sealed index and settings, and every
- * encrypted file and preview byte for byte, then zeros up to a Padmé size. Nothing in the file
- * is readable or recognisable without the password.
+ * (a list of items), the vault's list of files with each file's own key, and every encrypted file
+ * and preview byte for byte, then zeros up to a Padmé size. Nothing in the file is readable or
+ * recognisable without the password.
+ *
+ * A backup holds nothing that outlives it. The vault's master key never changes, so it stays out:
+ * with it, an old backup and its password would open any later copy of the vault. The vault's
+ * settings stay out too, since they list its duress passwords and hold its decoys' keys. All a
+ * backup's password opens is the files that were in the vault when it was made. (Backups made by
+ * 0.4.0 held both, and can still be restored.)
  */
 object Backup {
     val KDF = Kdf.Params(memoryKiB = 128 * 1024, iterations = 4, parallelism = 1)
@@ -42,8 +48,11 @@ object Backup {
     @Serializable
     private data class Item(val n: String, val s: Long)
 
+    /** [master] is only in backups made by 0.4.0 (v = 1), whose index is sealed with it. */
     @Serializable
-    private data class Manifest(val v: Int, val master: String, val created: Long, val items: List<Item>)
+    private data class Manifest(val v: Int, val master: String = "", val created: Long, val items: List<Item>)
+
+    private const val VERSION = 2
 
     @Serializable
     private data class SavedIndex(val entries: List<Entry> = emptyList())
@@ -158,22 +167,35 @@ object Backup {
     // ---- Creating a backup ------------------------------------------------------------------
 
     /**
-     * Writes a backup of [store] (whose master key is [master]) to [target]. It's written under a
-     * temporary name and only renamed once complete, so an interruption leaves no half file.
+     * Writes a backup of [store] to [target]. It's written under a temporary name and only
+     * renamed once complete, so an interruption leaves no half file.
      */
-    fun create(store: VaultStore, master: ByteArray, password: CharArray, target: File, progress: (Long, Long) -> Unit) {
+    fun create(store: VaultStore, password: CharArray, target: File, progress: (Long, Long) -> Unit) =
+        write(store, null, password, target, progress)
+
+    /**
+     * With [oldFormatMaster], writes the file the way 0.4.0 did, master key and settings included.
+     * Only the tests use that, to check such backups still restore.
+     */
+    internal fun write(store: VaultStore, oldFormatMaster: ByteArray?, password: CharArray, target: File, progress: (Long, Long) -> Unit) {
         val storage = store.storage
         storage.commit()
-        val index = storage.loadIndex() ?: throw IOException("the vault has nothing to back up")
-        val settings = storage.loadSettings()
-        val names = storage.names().sorted()
+        val entries = store.entries.value
+        if (entries.isEmpty()) throw IOException("the vault has nothing to back up")
+        val old = oldFormatMaster != null
+        // The list of files as it is, protected by the backup's own encryption and nothing else.
+        val index = if (old) storage.loadIndex()!! else json.encodeToString(SavedIndex(entries)).toByteArray()
+        val settings = if (old) storage.loadSettings() else null
+        val wanted = entries.filter { !it.folder }.flatMap { listOf(it.id, it.id + ".t") }.toSet()
+        val names = storage.names().filter { it in wanted }.sorted()
         val items = buildList {
             add(Item("index", index.size.toLong()))
             settings?.let { add(Item("settings", it.size.toLong())) }
             names.forEach { add(Item(it, storage.size(it))) }
         }
         val manifest = json.encodeToString(
-            Manifest(1, java.util.Base64.getEncoder().encodeToString(master), System.currentTimeMillis(), items),
+            if (oldFormatMaster != null) Manifest(1, java.util.Base64.getEncoder().encodeToString(oldFormatMaster), System.currentTimeMillis(), items)
+            else Manifest(VERSION, created = System.currentTimeMillis(), items = items),
         ).toByteArray()
         val content = 8L + 4 + manifest.size + items.sumOf { it.s }
         val total = ChunkedCipher.padme(content)
@@ -194,6 +216,7 @@ object Backup {
                 put(manifest)
                 manifest.fill(0)
                 put(index)
+                index.fill(0)
                 settings?.let { put(it) }
                 val buf = ByteArray(256 * 1024)
                 try {
@@ -249,6 +272,7 @@ object Backup {
             data.readFully(manifestBytes)
             val manifest = json.decodeFromString<Manifest>(String(manifestBytes))
             manifestBytes.fill(0)
+            if (manifest.v !in 1..VERSION) throw IOException("this backup was made by a newer version of Enclave")
             val master = java.util.Base64.getDecoder().decode(manifest.master)
             var read = 8L + 4 + manifestBytes.size
             fun readItem(size: Long): ByteArray = ByteArray(size.toInt()).also { data.readFully(it); read += size }
@@ -261,13 +285,23 @@ object Backup {
                 for (item in manifest.items) {
                     when (item.n) {
                         "index" -> {
-                            val sealed = readItem(item.s)
-                            val indexKey = Aead.subkey(master, "index")
-                            entries = json.decodeFromString<SavedIndex>(String(Aead.open(indexKey, sealed))).entries
-                            indexKey.fill(0)
+                            if (item.s !in 1..(256L shl 20)) throw IOException("the backup file is damaged")
+                            var plain = readItem(item.s)
+                            if (manifest.v == 1) {
+                                // 0.4.0: the vault's own sealed index, opened with its master key.
+                                val indexKey = Aead.subkey(master, "index")
+                                plain = Aead.open(indexKey, plain)
+                                indexKey.fill(0)
+                            }
+                            entries = json.decodeFromString<SavedIndex>(String(plain)).entries
+                            plain.fill(0)
                             entries.forEach { ids[it.id] = Aead.hex(Aead.random(16)) }
                         }
-                        "settings" -> readItem(item.s).fill(0) // the vault being restored into keeps its own
+                        // Only in 0.4.0's backups. The vault being restored into keeps its own.
+                        "settings" -> {
+                            if (item.s !in 0..(64L shl 20)) throw IOException("the backup file is damaged")
+                            readItem(item.s).fill(0)
+                        }
                         else -> {
                             val id = item.n.removeSuffix(".t")
                             val newId = ids[id]

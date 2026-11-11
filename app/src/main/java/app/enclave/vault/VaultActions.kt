@@ -51,23 +51,51 @@ object VaultActions {
         PlainPrefs.resetFailures()
     }
 
-    fun changePassword(newPassword: CharArray, keyfileSecret: ByteArray?) {
-        val s = Session.current ?: return
-        VaultManager.setSlot(s.slot, newPassword, keyfileSecret, s.role, s.master)
-        s.store.updateSettings { it.copy(usesKeyfile = keyfileSecret != null) }
+    /**
+     * Whether this session can tell that [password] is in use already.
+     *
+     * The real vault knows every slot. A decoy knows only its own and the duress passwords added
+     * in this session, and checks nothing else: an unlocked decoy must not be a way to try
+     * passwords against the real vault, and must answer exactly as a real vault with the same
+     * passwords would. One Argon2id run either way, so the time taken is the same too.
+     */
+    private fun taken(s: Session.Unlocked, password: CharArray, keyfileSecret: ByteArray?): Pair<Boolean, VaultManager.Probe> {
+        val known = if (s.role == Role.MAIN) (0 until Header.SLOT_COUNT).toList() else listOf(s.slot)
+        val p = VaultManager.probe(password, keyfileSecret, known)
+        val other = (p.opens - s.slot).isNotEmpty() || synchronized(s.sessionDuress) { s.sessionDuress.any { it.second.contentEquals(p.tag) } }
+        return other to p
     }
 
-    /** Adds a duress password. Returns false if all key slots are in use. */
-    fun addDuress(password: CharArray, action: String, label: String): Boolean {
-        val s = Session.current ?: return false
+    /** Changes this vault's password. Returns false if another password here is the same. */
+    fun changePassword(newPassword: CharArray, keyfileSecret: ByteArray?): Boolean {
+        val s = Session.current ?: return true
+        if (taken(s, newPassword, keyfileSecret).first) return false
+        VaultManager.setSlot(s.slot, newPassword, keyfileSecret, s.role, s.master)
+        s.store.updateSettings { it.copy(usesKeyfile = keyfileSecret != null) }
+        return true
+    }
+
+    enum class Added { OK, IN_USE, NO_SLOTS }
+
+    /** Adds a duress password. */
+    fun addDuress(password: CharArray, action: String, label: String): Added {
+        val s = Session.current ?: return Added.NO_SLOTS
+        val (other, probe) = taken(s, password, null)
+        if (other || s.slot in probe.opens) return Added.IN_USE
         if (s.role != Role.MAIN) {
             // A decoy vault doesn't know where the real slots are, so it must never write the
-            // header. It records the entry so the decoy still looks like a fully working vault.
-            s.store.updateSettings { it.copy(duress = it.duress + DuressSlot(-1, action, label)) }
-            return true
+            // header. It records the entry so the decoy still looks like a fully working vault,
+            // with the same limit, for as long as it stays unlocked.
+            if (s.store.settings.value.duress.size >= Header.SLOT_COUNT - 1) return Added.NO_SLOTS
+            val entry = DuressSlot(-1, action, label)
+            // The same work a real vault does to write the slot, so this takes as long.
+            VaultManager.probe(password, null, emptyList())
+            synchronized(s.sessionDuress) { s.sessionDuress += entry to probe.tag }
+            s.store.updateSettings { it.copy(duress = it.duress + entry) }
+            return Added.OK
         }
         val used = s.store.settings.value.duress.map { it.slot }.toSet() + s.slot
-        val slot = VaultManager.freeSlot(used) ?: return false
+        val slot = VaultManager.freeSlot(used) ?: return Added.NO_SLOTS
         val master = Aead.random(Aead.KEY_BYTES)
         val role = if (action == "decoy") Role.DECOY else Role.WIPE
         val main = s.store.storage
@@ -86,7 +114,7 @@ object VaultActions {
         VaultManager.setSlot(slot, password, null, role, master)
         Aead.wipe(master)
         s.store.updateSettings { it.copy(duress = it.duress + DuressSlot(slot, action, label, dir, decoyKey)) }
-        return true
+        return Added.OK
     }
 
     fun removeDuress(d: DuressSlot) {
@@ -101,7 +129,38 @@ object VaultActions {
                 m.fill(0)
             }
         }
+        synchronized(s.sessionDuress) {
+            val i = s.sessionDuress.indexOfFirst { it.first == d }
+            if (i >= 0) s.sessionDuress.removeAt(i)
+        }
         s.store.updateSettings { st -> st.copy(duress = st.duress - d) }
+    }
+
+    /** Whether Settings offers to add files to this duress entry's decoy. */
+    fun canFill(d: DuressSlot): Boolean {
+        val s = Session.current ?: return false
+        if (d.action != "decoy") return false
+        return if (s.role == Role.MAIN) d.master != null else d.slot < 0
+    }
+
+    /**
+     * Adds [files] to a decoy from the session that made it. Returns how many were added, or -1
+     * if the decoy couldn't be opened. For an entry a decoy session only pretends to have, the
+     * files are read and counted and nothing is kept, like everything else in that session.
+     */
+    fun fillDecoy(d: DuressSlot, files: List<java.io.File>): Int {
+        val s = Session.current ?: return -1
+        if (s.role != Role.MAIN) {
+            if (d.slot >= 0) return -1
+            val buf = ByteArray(64 * 1024)
+            return files.count { f -> runCatching { f.inputStream().use { while (it.read(buf) >= 0) Unit } }.isSuccess }.also { buf.fill(0) }
+        }
+        val decoy = openDecoyForFilling(d) ?: return -1
+        try {
+            return files.count { f -> runCatching { decoy.importFile(f, null) }.isSuccess }
+        } finally {
+            decoy.close()
+        }
     }
 }
 

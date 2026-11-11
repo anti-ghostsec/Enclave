@@ -8,7 +8,13 @@ import kotlin.concurrent.thread
 
 /** The unlocked vault lives only in memory. Locking zeroes the keys and forgets everything. */
 object Session {
-    class Unlocked(val role: Role, val slot: Int, val master: ByteArray, val store: VaultStore)
+    class Unlocked(val role: Role, val slot: Int, val master: ByteArray, val store: VaultStore) {
+        /**
+         * Duress passwords a decoy session was asked to add, each with a tag of its password. They
+         * exist only here: a decoy can't write the header's slots (see [VaultActions.addDuress]).
+         */
+        val sessionDuress = mutableListOf<Pair<DuressSlot, ByteArray>>()
+    }
 
     /** Shown while a vault is being prepared or moved into the containers. */
     data class Busy(val title: String, val progress: Migration.Progress? = null)
@@ -19,8 +25,48 @@ object Session {
     private val _busy = MutableStateFlow<Busy?>(null)
     val busy: StateFlow<Busy?> = _busy
 
-    /** Set while the user is in a file picker / cross-profile prompt we opened, so auto-lock waits. */
-    @Volatile var awayByChoice = false
+    /** Why Enclave is about to leave the screen, when it's Enclave that sent the user away. */
+    enum class Away { PICKER, HANDOFF }
+
+    @Volatile private var away: Away? = null
+    @Volatile private var awaySince = 0L
+
+    /**
+     * Call right before sending the user to a system picker or permission screen ([Away.PICKER])
+     * or handing a file to another app ([Away.HANDOFF]). Auto-lock then waits a little longer than
+     * usual, but never indefinitely: see [lockDelayMs].
+     */
+    fun leaving(why: Away) {
+        away = why
+        awaySince = android.os.SystemClock.elapsedRealtime()
+    }
+
+    fun cameBack() {
+        away = null
+    }
+
+    /**
+     * How long after Enclave leaves the screen the vault locks, given the usual delay.
+     *
+     * In a picker Enclave opened, the vault stays open for [PICKER_GRACE_MS] so there's time to
+     * choose. After handing a file to another app the usual delay applies, unless that app reads
+     * the file straight from the open vault (a big file), which a lock would cut off: then it
+     * waits for that link to end, at most [Shares.LIFETIME_MS]. The screen turning off locks at
+     * once in every case.
+     */
+    fun lockDelayMs(usual: Long): Long {
+        val why = away
+        away = null
+        // Only a departure that follows straight on from the call counts.
+        if (why == null || android.os.SystemClock.elapsedRealtime() - awaySince > AWAY_WINDOW_MS) return usual
+        return when (why) {
+            Away.PICKER -> maxOf(usual, PICKER_GRACE_MS)
+            Away.HANDOFF -> maxOf(usual, Shares.vaultNeededForMs())
+        }
+    }
+
+    const val PICKER_GRACE_MS = 5 * 60 * 1000L
+    private const val AWAY_WINDOW_MS = 15_000L
 
     /** The containers, open while a vault is. */
     @Volatile var segments: Segments? = null
@@ -46,7 +92,8 @@ object Session {
             // containers never writes to them: with only it unlocked, a write could land on the
             // hidden real vault, which this session can't see. Changes look like they work and
             // are kept in memory until it locks, so nothing gives the decoy away.
-            val storage = old ?: SessionOnlyStorage(ContainerStorage.open(segs, r.master, readOnly = true) ?: EmptyStorage())
+            val storage = old
+                ?: SessionOnlyStorage(ContainerStorage.open(segs, r.master, readOnly = true) ?: EmptyStorage(), VaultManager.scratchDir)
             ready(r, storage)
             return
         }
@@ -74,6 +121,9 @@ object Session {
                 existing.finishMigration()
                 ready(r, existing)
             }
+            // Containers are already here (kept through a wipe): a new vault in them takes no
+            // longer than opening one, so no screen that would show a vault was just made.
+            segs.all.isNotEmpty() -> ready(r, ContainerStorage.create(segs, r.master, migrated = true))
             else -> background(r, "Preparing secure storage") { ContainerStorage.create(segs, r.master, migrated = true) }
         }
     }
@@ -130,6 +180,7 @@ object Session {
         _busy.value = null
         s?.store?.close()
         s?.master?.let(Aead::wipe)
+        s?.sessionDuress?.let { list -> synchronized(list) { list.forEach { it.second.fill(0) }; list.clear() } }
         // A move in progress closes the containers itself once it has stopped.
         if (worker == null) closeSegments()
     }

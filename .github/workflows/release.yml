@@ -1,0 +1,62 @@
+name: Release
+
+# Pushing a tag like v0.5.0 tests, builds and signs the app, and puts the APK in a draft release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag matches the app's version
+        run: |
+          version=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME, app $version"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      # The signing key lives only in the repository's secrets. Without it nothing is released,
+      # because an APK signed by any other key can't be installed over the one people have.
+      - name: Signing key
+        env:
+          KEYSTORE: ${{ secrets.ENCLAVE_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$KEYSTORE" || { echo "The signing secrets are not set."; exit 1; }
+          printf '%s' "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.jks"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools ndk;29.0.14206865
+      - name: Rust targets
+        run: rustup target add aarch64-linux-android
+      - name: Deniable storage crate tests
+        working-directory: native
+        run: cargo test --release
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Unit tests
+        run: ./gradlew testDebugUnitTest
+      - name: Build
+        env:
+          ORG_GRADLE_PROJECT_ENCLAVE_STORE_PASSWORD: ${{ secrets.ENCLAVE_STORE_PASSWORD }}
+          ORG_GRADLE_PROJECT_ENCLAVE_KEY_ALIAS: ${{ secrets.ENCLAVE_KEY_ALIAS }}
+          ORG_GRADLE_PROJECT_ENCLAVE_KEY_PASSWORD: ${{ secrets.ENCLAVE_KEY_PASSWORD }}
+        run: |
+          ./gradlew assembleRelease -PENCLAVE_STORE_FILE="$RUNNER_TEMP/release.jks"
+          cp app/build/outputs/apk/release/app-release.apk "Enclave-$VERSION.apk"
+      - name: The APK is signed
+        run: |
+          tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$tools/apksigner" verify --print-certs "Enclave-$VERSION.apk"
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "Enclave-$VERSION.apk" --draft --verify-tag --title "Enclave $VERSION" --notes ""
+      - name: Remove the key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"

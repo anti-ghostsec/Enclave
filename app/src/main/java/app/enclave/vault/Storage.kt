@@ -121,18 +121,35 @@ class EmptyStorage : Storage {
 }
 
 /**
- * A vault that appears fully writable but keeps every change in memory for this session only.
- * Used for a decoy opened on its own: adding, renaming and deleting all work as anyone checking
- * would expect, yet nothing is written to the containers, where it could land on the hidden real
+ * A vault that appears fully writable but keeps every change for this session only. Used for a
+ * decoy opened on its own: adding, renaming and deleting all work as anyone checking would
+ * expect, yet nothing is written to the containers, where it could land on the hidden real
  * vault's blocks. Everything changed is forgotten when the vault locks.
+ *
+ * Small blobs stay in memory. Bigger ones go to files in [scratch], so there's room for as much
+ * as a vault in the containers would take, not just what fits in memory. Those files hold only
+ * what the containers would: blobs already encrypted with keys that exist in memory alone. They
+ * are deleted when the vault locks, and whatever a crash leaves behind is unreadable and removed
+ * when Enclave next starts. Without [scratch], everything stays in memory, up to [MEMORY_ONLY_LIMIT].
  */
-class SessionOnlyStorage(private val base: Storage) : Storage {
+class SessionOnlyStorage(private val base: Storage, private val scratch: File? = null) : Storage {
     override val readOnly = false
-    private val added = HashMap<String, ByteArray>()
+
+    private class Blob(val bytes: ByteArray?, val file: File?) {
+        val size: Long get() = bytes?.size?.toLong() ?: file!!.length()
+        fun discard() {
+            bytes?.fill(0)
+            file?.delete()
+        }
+    }
+
+    private val added = HashMap<String, Blob>()
     private val removed = HashSet<String>()
     private var index: ByteArray? = null
     private var settings: ByteArray? = null
-    private var bytes = 0L
+    /** Bytes of blobs held in memory. */
+    private var inMemory = 0L
+    private var files = 0L
 
     override fun loadIndex(): ByteArray? = synchronized(this) { index?.copyOf() } ?: base.loadIndex()
     override fun loadSettings(): ByteArray? = synchronized(this) { settings?.copyOf() } ?: base.loadSettings()
@@ -151,34 +168,98 @@ class SessionOnlyStorage(private val base: Storage) : Storage {
     override fun names(): Set<String> = base.names() - removed + added.keys
 
     @Synchronized
-    override fun size(name: String): Long = added[name]?.size?.toLong() ?: if (name in removed) -1 else base.size(name)
+    override fun size(name: String): Long = added[name]?.size ?: if (name in removed) -1 else base.size(name)
 
     override fun open(name: String): BlobSource {
         synchronized(this) {
-            added[name]?.let { return app.enclave.crypto.BytesBlob(it) }
+            added[name]?.let { b -> return b.bytes?.let { app.enclave.crypto.BytesBlob(it) } ?: app.enclave.crypto.FileBlob(b.file!!) }
             if (name in removed) throw IOException("no such file")
         }
         return base.open(name)
     }
 
-    override fun put(name: String, write: (OutputStream) -> Unit) {
-        val out = object : java.io.ByteArrayOutputStream() {
-            override fun write(b: ByteArray, off: Int, len: Int) {
-                if (synchronized(this@SessionOnlyStorage) { bytes } + count + len > LIMIT) throw StorageFullException()
-                super.write(b, off, len)
+    /** Collects a blob in memory, moving it to a file once it's too big to keep there. */
+    private inner class Collector : OutputStream() {
+        private var mem: java.io.ByteArrayOutputStream? = java.io.ByteArrayOutputStream()
+        private var file: File? = null
+        private var out: OutputStream? = null
+
+        override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            val m = mem
+            if (m != null) {
+                val held = synchronized(this@SessionOnlyStorage) { inMemory }
+                if (m.size() + len <= IN_MEMORY_BLOB && held + m.size() + len <= IN_MEMORY_TOTAL) return m.write(b, off, len)
+                if (scratch == null) {
+                    if (held + m.size() + len > MEMORY_ONLY_LIMIT) throw StorageFullException()
+                    return m.write(b, off, len)
+                }
+                spill(m)
+            }
+            try {
+                out!!.write(b, off, len)
+            } catch (e: IOException) {
+                // The phone's storage ran out, as it would for a vault adding a container.
+                throw StorageFullException()
             }
         }
-        write(out)
+
+        private fun spill(m: java.io.ByteArrayOutputStream) {
+            try {
+                scratch!!.mkdirs()
+                val f = File(scratch, synchronized(this@SessionOnlyStorage) { files++ }.toString())
+                file = f
+                val o = f.outputStream().buffered(256 * 1024)
+                out = o
+                m.writeTo(o)
+            } catch (e: IOException) {
+                throw StorageFullException()
+            }
+            mem = null
+        }
+
+        fun finish(): Blob {
+            try {
+                out?.close()
+            } catch (e: IOException) {
+                throw StorageFullException()
+            }
+            // Like everything else here, it says nothing about when it was written.
+            file?.setLastModified(VaultStore.FIXED_TIME)
+            return Blob(mem?.toByteArray(), file)
+        }
+
+        fun abandon() {
+            runCatching { out?.close() }
+            file?.delete()
+        }
+    }
+
+    override fun put(name: String, write: (OutputStream) -> Unit) {
+        val c = Collector()
+        val blob = try {
+            write(c)
+            c.finish()
+        } catch (t: Throwable) {
+            c.abandon()
+            throw t
+        }
         synchronized(this) {
-            added.put(name, out.toByteArray())?.let { bytes -= it.size }
-            bytes += out.size()
+            added.put(name, blob)?.let { forget(it) }
+            blob.bytes?.let { inMemory += it.size }
             removed += name
         }
     }
 
+    private fun forget(b: Blob) {
+        b.bytes?.let { inMemory -= it.size }
+        b.discard()
+    }
+
     @Synchronized
     override fun delete(name: String) {
-        added.remove(name)?.let { it.fill(0); bytes -= it.size }
+        added.remove(name)?.let { forget(it) }
         removed += name
     }
 
@@ -186,14 +267,20 @@ class SessionOnlyStorage(private val base: Storage) : Storage {
 
     @Synchronized
     override fun close() {
-        added.values.forEach { it.fill(0) }
+        added.values.forEach { it.discard() }
         added.clear()
+        inMemory = 0
+        scratch?.deleteRecursively()
         index?.fill(0); settings?.fill(0)
         base.close()
     }
 
     private companion object {
-        /** Memory this may use before it says storage is full. */
-        const val LIMIT = 192L * 1024 * 1024
+        /** A blob up to this size is kept in memory (every preview is smaller). */
+        const val IN_MEMORY_BLOB = 256 * 1024
+        /** Memory the small blobs may use before they go to files too. */
+        const val IN_MEMORY_TOTAL = 32L * 1024 * 1024
+        /** With nowhere to put files: memory this may use before it says storage is full. */
+        const val MEMORY_ONLY_LIMIT = 192L * 1024 * 1024
     }
 }

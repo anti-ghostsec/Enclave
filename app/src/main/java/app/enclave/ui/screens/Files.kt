@@ -111,6 +111,7 @@ import app.enclave.ui.StorageBrowser
 import app.enclave.ui.freeName
 import androidx.compose.material.icons.filled.Share
 import java.io.File
+import app.enclave.ui.PrivateKeyboard
 import app.enclave.ui.leavingOnPurpose
 import app.enclave.ui.openExternally
 import app.enclave.ui.toast
@@ -255,6 +256,7 @@ fun FilesScreen(
                         query, { query = it },
                         placeholder = { Text("Search all files") },
                         singleLine = true,
+                        keyboardOptions = PrivateKeyboard,
                         leadingIcon = { Icon(Icons.Default.Search, null) },
                         trailingIcon = if (searching) {
                             { IconButton(onClick = { query = "" }) { Icon(Icons.Default.Close, "Clear") } }
@@ -593,7 +595,7 @@ private fun NameDialog(title: String, initial: String, onDismiss: () -> Unit, on
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
-        text = { OutlinedTextField(name, { name = it }, singleLine = true) },
+        text = { OutlinedTextField(name, { name = it }, singleLine = true, keyboardOptions = PrivateKeyboard) },
         confirmButton = { TextButton(enabled = name.isNotBlank(), onClick = { onOk(name.trim()) }) { Text("OK") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )

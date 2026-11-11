@@ -1,4 +1,4 @@
-# Enclave's Rust code: the shared deniable storage crate, and the bridge the
+# Enclave's Rust code: the deniable storage crate, and the bridge the
 # app loads to keep its vault inside deniable containers.
 [workspace]
 resolver = "2"

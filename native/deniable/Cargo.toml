@@ -1,6 +1,4 @@
-# This crate is copied, unchanged, into Torus, The Sentinel Protocol, FerroOS
-# and Enclave. Change it in one place and copy the folder to the others, so
-# the copies never drift apart. It inherits nothing from any workspace.
+# Enclave's deniable storage crate. It inherits nothing from the workspace.
 [package]
 name = "deniable"
 description = "Deniable storage: encrypted volumes hidden in a container of random bytes"

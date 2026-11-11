@@ -25,17 +25,19 @@ class EnclaveApp : Application() {
         PlainPrefs.init(this)
         VaultManager.init(this)
         PlainPrefs.forgetOldKeyfileLocation(this)
+        app.enclave.disguise.Disguise.moveOldPicker(this)
 
-        // Auto-lock when Enclave leaves the screen (unless the user is in a picker we opened).
+        // Auto-lock when Enclave leaves the screen. A picker Enclave opened, or a big file being
+        // read by another app, gets a longer but always limited wait: see Session.lockDelayMs.
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) {
                 handler.removeCallbacks(lock)
-                Session.awayByChoice = false
+                Session.cameBack()
             }
 
             override fun onStop(owner: LifecycleOwner) {
-                if (Session.awayByChoice) return
-                handler.postDelayed(lock, PlainPrefs.autoLockSeconds * 1000L)
+                handler.removeCallbacks(lock)
+                handler.postDelayed(lock, Session.lockDelayMs(PlainPrefs.autoLockSeconds * 1000L))
             }
         })
 

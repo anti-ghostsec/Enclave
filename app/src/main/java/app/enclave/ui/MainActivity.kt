@@ -40,7 +40,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             EnclaveTheme {
                 // Surface supplies the readable text colour for every screen.
-                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) { Root() }
+                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) { NoKeyboardLearning { Root() } }
             }
         }
     }

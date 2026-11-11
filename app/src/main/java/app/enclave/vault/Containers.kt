@@ -34,6 +34,19 @@ class Segments(val dir: File, val segmentBlocks: Long = DEFAULT_BLOCKS) : Closea
                 val h = Native.open(f.path)
                 list += Segment(i, h, Native.blocks(h))
             }
+        stamp()
+    }
+
+    /**
+     * Gives every container the same fixed modified time, so the files don't show when the vault
+     * was last written. Done whenever the containers are opened, saved to or closed, whichever
+     * vault is unlocked, so the time the system itself records for the change says only when
+     * Enclave was last unlocked.
+     */
+    @Synchronized
+    fun stamp() {
+        dir.listFiles().orEmpty().forEach { it.setLastModified(VaultStore.FIXED_TIME) }
+        dir.setLastModified(VaultStore.FIXED_TIME)
     }
 
     val all: List<Segment> @Synchronized get() = list.toList()
@@ -53,13 +66,14 @@ class Segments(val dir: File, val segmentBlocks: Long = DEFAULT_BLOCKS) : Closea
             tmp.delete()
             throw java.io.IOException("couldn't name the new container")
         }
-        return Segment(i, h, segmentBlocks).also { list += it }
+        return Segment(i, h, segmentBlocks).also { list += it; stamp() }
     }
 
     @Synchronized
     override fun close() {
         list.forEach { Native.close(it.handle) }
         list.clear()
+        stamp()
     }
 
     companion object {
@@ -116,7 +130,6 @@ class ContainerStorage private constructor(
     private val full = HashSet<Int>()
 
     private var home = -1
-    private var gen = 0L
     private var rootExtent: Extent? = null
     private var migratedFlag = true
     private var index: ByteArray? = null
@@ -393,11 +406,11 @@ class ContainerStorage private constructor(
             Extent(home, end, need)
         }
         volWrite(home, at.o, sealed, 0, sealed.size)
-        volWrite(home, 0, header(gen + 1, at), 0, HEADER_BYTES)
+        volWrite(home, 0, header(SAVED, at), 0, HEADER_BYTES)
         // 3. The crate saves the home volume atomically: the old root stays valid until now.
         Native.flush(handle(home))
         unflushed[home] = 0
-        gen += 1
+        segs.stamp()
         rootExtent = at
         pending.forEach(::addFree)
         pending.clear()
@@ -438,6 +451,12 @@ class ContainerStorage private constructor(
     companion object {
         private val MAGIC = "ENCLHDR1".toByteArray()
         const val HEADER_BYTES = 36
+        /**
+         * What the header's generation field holds once a root is saved. Earlier versions counted
+         * saves there; a count shows how often a vault was written, which for a decoy is more
+         * than its own use explains. Only the home volume ever has a root, so nothing needs it.
+         */
+        private const val SAVED = 1L
         /** The volume's first bytes hold the header; data starts after one full block of payload. */
         private const val DATA_START = 4096L
         private const val CHUNK = 8L * 1024 * 1024
@@ -463,9 +482,8 @@ class ContainerStorage private constructor(
                 val root = Extent(h.int, h.long, h.long)
                 if (root.n > 0 && (best == null || gen > best.second)) best = Triple(s.index, gen, root)
             }
-            val (home, gen, rootAt) = best ?: return null.also { cs.wipeKeys() }
+            val (home, _, rootAt) = best ?: return null.also { cs.wipeKeys() }
             cs.home = home
-            cs.gen = gen
             cs.rootExtent = rootAt
             val sealed = cs.volReadFully(rootAt.s, rootAt.o, rootAt.n.toInt())
             val root = cs.json.decodeFromString<Root>(String(Aead.open(cs.rootKey, sealed)))
@@ -502,6 +520,7 @@ class ContainerStorage private constructor(
                     Native.flush(s.handle)
                 }
             }
+            segs.stamp()
             key.fill(0)
         }
     }

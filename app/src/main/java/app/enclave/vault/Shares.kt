@@ -16,13 +16,20 @@ import java.util.concurrent.ConcurrentHashMap
 object Shares {
     const val LIFETIME_MS = 30 * 60 * 1000L
 
-    class Share(val open: () -> BlobSource, val key: ByteArray, val name: String, val mime: String, val size: Long, val expires: Long)
+    class Share(
+        val open: () -> BlobSource, val key: ByteArray, val name: String, val mime: String, val size: Long, val expires: Long,
+        /** True if it reads from the open vault, so it ends when the vault locks. */
+        val needsVault: Boolean,
+    )
 
     private val live = ConcurrentHashMap<String, Share>()
 
     fun create(context: Context, store: VaultStore, e: Entry): Uri {
         val token = Aead.hex(Aead.random(16))
-        live[token] = Share(store.shareSource(e), store.keyBytes(e), e.name, e.mime, e.size, System.currentTimeMillis() + LIFETIME_MS)
+        live[token] = Share(
+            store.shareSource(e), store.keyBytes(e), e.name, e.mime, e.size, System.currentTimeMillis() + LIFETIME_MS,
+            needsVault = !store.sharesOutliveLock(e),
+        )
         return Uri.parse("content://${context.packageName}.files/$token/${Uri.encode(e.name)}")
     }
 
@@ -37,6 +44,12 @@ object Shares {
     }
 
     fun isLive(uri: Uri) = get(uri) != null
+
+    /** How much longer a live link needs the vault to stay open; 0 if none does. */
+    fun vaultNeededForMs(): Long {
+        val now = System.currentTimeMillis()
+        return live.values.filter { it.needsVault }.maxOfOrNull { it.expires - now }?.coerceIn(0, LIFETIME_MS) ?: 0
+    }
 
     fun clear() {
         live.values.forEach { it.key.fill(0) }

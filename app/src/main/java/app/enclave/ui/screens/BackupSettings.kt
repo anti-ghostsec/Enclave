@@ -84,7 +84,7 @@ fun BackupSettings(s: Session.Unlocked) {
             val name = "backup-" + SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date()) + ".bin"
             val target = app.enclave.ui.freeName(dirs[0], name)
             run("Creating encrypted backup") { progress ->
-                Backup.create(s.store, s.master, st.password.toCharArray(), target, progress)
+                Backup.create(s.store, st.password.toCharArray(), target, progress)
                 "Backup saved as ${target.name}"
             }
         }

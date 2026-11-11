@@ -1,6 +1,5 @@
-# Enclave's bridge from Kotlin to the deniable storage crate. The crate itself
-# is shared with other projects and stays unchanged; everything Enclave-specific
-# lives here or in the app.
+# Enclave's bridge from Kotlin to the deniable storage crate. The crate knows
+# nothing about Android; everything app-specific lives here or in the app.
 [package]
 name = "enclave-jni"
 version = "0.1.0"

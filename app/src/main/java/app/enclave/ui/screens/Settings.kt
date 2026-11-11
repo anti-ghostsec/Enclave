@@ -72,13 +72,13 @@ import app.enclave.ui.PickActivity
 import app.enclave.ui.ShareAppsEditor
 import app.enclave.ui.KeyfileState
 import app.enclave.ui.PasswordField
+import app.enclave.ui.PrivateKeyboard
 import app.enclave.ui.SectionTitle
 import app.enclave.ui.leavingOnPurpose
 import app.enclave.ui.toast
 import app.enclave.vault.PlainPrefs
 import app.enclave.vault.Session
 import app.enclave.vault.VaultActions
-import app.enclave.vault.VaultManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -134,14 +134,14 @@ fun SettingsScreen(s: Session.Unlocked, disguiseLabel: String) {
                     Text(
                         when {
                             d.action != "decoy" -> "Silently wipes everything, then opens an empty vault"
-                            d.master != null -> "Opens a decoy vault. Fill it from here: changes made inside the decoy itself are kept only until it locks."
+                            VaultActions.canFill(d) -> "Opens a decoy vault. Fill it from here: changes made inside the decoy itself are kept only until it locks."
                             else -> "Opens a decoy vault"
                         },
                     )
                 },
                 trailingContent = { IconButton(onClick = { VaultActions.removeDuress(d) }) { Icon(Icons.Default.Delete, "Remove") } },
             )
-            if (d.master != null && s.role == app.enclave.vault.Role.MAIN) {
+            if (VaultActions.canFill(d)) {
                 TextButton(onClick = { fillingDecoy = d }) { Text("Add harmless files to this decoy") }
             }
         }
@@ -212,14 +212,7 @@ fun SettingsScreen(s: Session.Unlocked, disguiseLabel: String) {
         app.enclave.ui.StorageBrowser(app.enclave.ui.BrowseMode.FILES, onDismiss = { fillingDecoy = null }, confirmLabel = "Add to decoy") { files ->
             fillingDecoy = null
             scope.launch {
-                val added = withContext(Dispatchers.IO) {
-                    val decoy = app.enclave.vault.openDecoyForFilling(d) ?: return@withContext -1
-                    try {
-                        files.count { f -> runCatching { decoy.importFile(f, null) }.isSuccess }
-                    } finally {
-                        decoy.close()
-                    }
-                }
+                val added = withContext(Dispatchers.IO) { VaultActions.fillDecoy(d, files) }
                 ctx.toast(if (added < 0) "Couldn't open the decoy" else "Added $added file(s) to the decoy")
             }
         }
@@ -265,14 +258,11 @@ private fun ChangePasswordDialog(onDone: () -> Unit) {
                 if (error != null) return@TextButton
                 busy = true
                 scope.launch {
-                    val clash = withContext(Dispatchers.Default) { VaultManager.unlock(pw.toCharArray(), keyfile.secret) }
-                    if (clash != null && clash.slot != Session.current?.slot) {
-                        clash.master.fill(0)
+                    val changed = withContext(Dispatchers.Default) { VaultActions.changePassword(pw.toCharArray(), keyfile.secret) }
+                    if (!changed) {
                         busy = false; error = "Choose a different password"
                         return@launch
                     }
-                    clash?.master?.fill(0)
-                    withContext(Dispatchers.Default) { VaultActions.changePassword(pw.toCharArray(), keyfile.secret) }
                     keyfile.clear()
                     ctx.toast("Password changed")
                     onDone()
@@ -297,7 +287,7 @@ private fun AddDuressDialog(onDone: () -> Unit) {
         title = { Text("Add duress password") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(label, { label = it }, label = { Text("Name (only you see this)") }, singleLine = true)
+                OutlinedTextField(label, { label = it }, label = { Text("Name (only you see this)") }, singleLine = true, keyboardOptions = PrivateKeyboard)
                 PasswordField(pw, { pw = it }, "Duress password")
                 listOf(
                     "decoy" to "Open a decoy vault — put some harmless files in it so it looks real",
@@ -317,17 +307,13 @@ private fun AddDuressDialog(onDone: () -> Unit) {
             TextButton(enabled = !busy && pw.length >= 4, onClick = {
                 busy = true; error = null
                 scope.launch {
-                    val clash = withContext(Dispatchers.Default) { VaultManager.unlock(pw.toCharArray(), null) }
-                    if (clash != null) {
-                        clash.master.fill(0)
-                        busy = false; error = "That password is already in use"
-                        return@launch
-                    }
-                    val ok = withContext(Dispatchers.Default) { VaultActions.addDuress(pw.toCharArray(), action, label) }
+                    val added = withContext(Dispatchers.Default) { VaultActions.addDuress(pw.toCharArray(), action, label) }
                     busy = false
-                    if (ok) {
-                        ctx.toast("Duress password added"); onDone()
-                    } else error = "No free slots left (maximum 3 duress passwords)"
+                    when (added) {
+                        VaultActions.Added.OK -> { ctx.toast("Duress password added"); onDone() }
+                        VaultActions.Added.IN_USE -> error = "That password is already in use"
+                        VaultActions.Added.NO_SLOTS -> error = "No free slots left (maximum 3 duress passwords)"
+                    }
                 }
             }) { Text("Add") }
         },
@@ -378,7 +364,7 @@ private fun CustomShortcut() {
                 icon?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize()) }
                     ?: Text("Pick", Modifier.align(Alignment.Center), style = MaterialTheme.typography.labelSmall)
             }
-            OutlinedTextField(name, { name = it.take(24) }, label = { Text("Name") }, singleLine = true, modifier = Modifier.weight(1f))
+            OutlinedTextField(name, { name = it.take(24) }, label = { Text("Name") }, singleLine = true, keyboardOptions = PrivateKeyboard, modifier = Modifier.weight(1f))
         }
         OutlinedButton(enabled = name.isNotBlank() && icon != null, onClick = {
             if (!Disguise.canPinShortcut(ctx)) ctx.toast("Your launcher doesn't support custom shortcuts")
@@ -498,7 +484,7 @@ private fun OpeningSettings(s: Session.Unlocked) {
         supportingContent = {
             Text(
                 "Enclave appears when a browser, forum or chat asks you to choose a file. You unlock first, and the app only gets the " +
-                    "files you tap. Note: it shows up there with the name “Enclave”, even when disguised.",
+                    "files you tap. It shows up there under the name and icon of the disguise chosen above.",
             )
         },
         trailingContent = {

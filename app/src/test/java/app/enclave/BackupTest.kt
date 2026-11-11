@@ -4,6 +4,7 @@ import app.enclave.crypto.Aead
 import app.enclave.crypto.BlobSource
 import app.enclave.vault.Backup
 import app.enclave.vault.ContainerStorage
+import app.enclave.vault.DuressSlot
 import app.enclave.vault.Segments
 import app.enclave.vault.Storage
 import app.enclave.vault.VaultStore
@@ -48,9 +49,9 @@ class BackupTest {
 
     @Test
     fun restoresIntoAnotherVaultWithEverythingIntact() {
-        val (store, master, files) = vault()
+        val (store, _, files) = vault()
         val backup = File(tmp(), "backup.bin")
-        Backup.create(store, master, pw, backup) { _, _ -> }
+        Backup.create(store, pw, backup) { _, _ -> }
         assertFalse(File(backup.path + ".tmp").exists())
 
         // Into a different vault, in the containers, on "another phone".
@@ -76,9 +77,9 @@ class BackupTest {
 
     @Test
     fun wrongPasswordDamageAndCutsAreRefused() {
-        val (store, master, _) = vault()
+        val (store, _, _) = vault()
         val backup = File(tmp(), "backup.bin")
-        Backup.create(store, master, pw, backup) { _, _ -> }
+        Backup.create(store, pw, backup) { _, _ -> }
         val target = VaultStore(tmp(), Aead.random(32))
 
         assertTrue(runCatching { Backup.restore(backup, "wrong".toCharArray(), target, "R") { _, _ -> } }.exceptionOrNull() is Backup.WrongPassword)
@@ -98,9 +99,9 @@ class BackupTest {
 
     @Test
     fun theFileGivesNothingAway() {
-        val (store, master, _) = vault()
+        val (store, _, _) = vault()
         val backup = File(tmp(), "backup.bin")
-        Backup.create(store, master, pw, backup) { _, _ -> }
+        Backup.create(store, pw, backup) { _, _ -> }
         val bytes = backup.readBytes()
         val text = String(bytes, Charsets.ISO_8859_1)
         listOf("ENCF", "Trips", "a.jpg", "index", "master", "\"entries\"").forEach { assertFalse(it, text.contains(it)) }
@@ -109,6 +110,42 @@ class BackupTest {
         val expected = bytes.size / 256.0
         assertTrue(counts.all { it > expected * 0.8 && it < expected * 1.2 })
         store.close()
+    }
+
+    /** A backup made by 0.4.0, which held the vault's master key and settings, still restores. */
+    @Test
+    fun aBackupInTheFirstFormatStillRestores() {
+        val (store, master, files) = vault()
+        store.updateSettings { it.copy(duress = listOf(DuressSlot(2, "wipe", "panic"))) }
+        val backup = File(tmp(), "old.bin")
+        Backup.write(store, master, pw, backup) { _, _ -> }
+        val target = VaultStore(tmp(), Aead.random(32))
+        assertEquals(3, Backup.restore(backup, pw, target, "Restored") { _, _ -> })
+        val restored = contents(target)
+        files.forEach { (name, bytes) -> assertArrayEquals(name, bytes, restored[name]) }
+        // The vault restored into keeps its own settings.
+        assertTrue(target.settings.value.duress.isEmpty())
+        target.close(); store.close()
+    }
+
+    /**
+     * A backup carries the files and nothing that would open anything else: it's made and
+     * restored without the vault's master key, and the settings, with the duress passwords they
+     * list, don't come along.
+     */
+    @Test
+    fun aBackupLeavesOutTheMasterKeyAndTheSettings() {
+        val (store, master, _) = vault()
+        store.updateSettings { it.copy(duress = List(3) { i -> DuressSlot(i, "decoy", "label $i", master = "k".repeat(44)) }) }
+        // What goes in is the list of files, read without the vault's keys.
+        val fresh = File(tmp(), "new.bin")
+        Backup.create(store, pw, fresh) { _, _ -> }
+        val target = VaultStore(tmp(), Aead.random(32))
+        target.updateSettings { it.copy(slideshowSeconds = 15) }
+        assertEquals(3, Backup.restore(fresh, pw, target, "R") { _, _ -> })
+        assertTrue(target.settings.value.duress.isEmpty())
+        assertEquals(15, target.settings.value.slideshowSeconds)
+        target.close(); store.close()
     }
 
     @Test
@@ -127,7 +164,7 @@ class BackupTest {
         }
         val dir = tmp()
         val backup = File(dir, "backup.bin")
-        assertTrue(runCatching { Backup.create(VaultStore(failing, master.copyOf()), master, pw, backup) { _, _ -> } }.isFailure)
+        assertTrue(runCatching { Backup.create(VaultStore(failing, master.copyOf()), pw, backup) { _, _ -> } }.isFailure)
         assertTrue(dir.list()!!.isEmpty())
         store.close()
     }
