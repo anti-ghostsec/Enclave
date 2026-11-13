@@ -242,6 +242,10 @@ class ContainerStorage private constructor(
      * root that listed its own place as free, and after that a file's too. Whatever the saved
      * root or one of its files uses is taken out, overlapping entries are joined, and entries
      * outside this vault's volumes are dropped, so such a vault stops getting worse.
+     *
+     * The saved root is the only thing that says what is in use, so everything else inside a
+     * volume is free whether the list says so or not: space written just before a crash, which
+     * no root ever came to list, is found again here instead of being lost for good.
      */
     private fun loadFree(saved: List<Extent>) {
         val used = listOfNotNull(rootExtent) + files.values.flatMap { it.ext }
@@ -251,8 +255,9 @@ class ContainerStorage private constructor(
             val n = e.o + e.n - o
             if (e.o < 0 || e.n <= 0 || n <= 0) null else Extent(e.s, o, n)
         }
+        val volumes = vol.keys.map { s -> Extent(s, DATA_START, (ends[s] ?: DATA_START) - DATA_START) }
         free.clear()
-        free += subtractExtents(usable, used)
+        free += subtractExtents(usable + volumes, used)
         // A volume never ends before something in it that's used or free: new space starts after.
         for (e in used + free) ends[e.s]?.let { end -> if (e.n > 0 && e.o + e.n > end) ends[e.s] = e.o + e.n }
     }

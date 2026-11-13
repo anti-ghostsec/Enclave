@@ -4,7 +4,12 @@ import app.enclave.crypto.Aead
 import app.enclave.crypto.BlobSource
 import app.enclave.crypto.ChunkedCipher
 import app.enclave.vault.DirStorage
+import app.enclave.vault.Backup
 import app.enclave.vault.DuressSlot
+import app.enclave.vault.Entry
+import app.enclave.vault.ImportProblem
+import app.enclave.vault.PlainPrefs
+import app.enclave.vault.StorageFullException
 import app.enclave.vault.Header
 import app.enclave.vault.Storage
 import app.enclave.vault.VaultManager
@@ -145,6 +150,84 @@ class SecondAuditTest {
         assertEquals("no room", store.problem.value)
         store.close()
         assertFalse(store.updateSettings { it })
+    }
+
+    @Test
+    fun aBackupsListIsMadeSoundAndAnHonestOneIsLeftAlone() {
+        val honest = listOf(
+            Entry("f1", null, "top", folder = true), Entry("f2", "f1", "inner", folder = true),
+            Entry("a", "f2", "a.jpg"), Entry("b", null, "b.jpg"),
+        )
+        assertEquals(honest, Backup.sound(honest))
+
+        val crafted = listOf(
+            Entry("x", "y", "x", folder = true), Entry("y", "x", "y", folder = true), // each other's parent
+            Entry("self", "self", "self", folder = true),
+            Entry("below", "x", "below.jpg"),
+            Entry("dup", null, "first.jpg"), Entry("dup", null, "second.jpg"),
+            Entry("lost", "nowhere", "lost.jpg"), Entry("infile", "dup", "in-a-file.jpg"),
+            Entry("", null, "no id"),
+        )
+        val made = Backup.sound(crafted)
+        assertEquals(listOf("x", "y", "self", "below", "dup", "lost", "infile"), made.map { it.id })
+        assertEquals("first.jpg", made.first { it.id == "dup" }.name)
+        assertNull(made.first { it.id == "x" }.parent)
+        assertNull(made.first { it.id == "y" }.parent)
+        assertNull(made.first { it.id == "self" }.parent)
+        assertEquals("x", made.first { it.id == "below" }.parent)
+        assertNull(made.first { it.id == "lost" }.parent)
+        assertNull(made.first { it.id == "infile" }.parent)
+
+        // And a list that got in some other way with a loop in it doesn't hang the vault.
+        val store = VaultStore(tmp(), Aead.random(32))
+        store.addRestored(listOf(Entry("x", "y", "x", folder = true), Entry("y", "x", "y", folder = true), Entry("f", "x", "f.jpg")))
+        assertFalse(store.isWithin("f", "elsewhere"))
+        assertTrue(store.isWithin("f", "y"))
+        assertTrue(store.pathOf(store.entries.value.first { it.id == "f" }).endsWith("f.jpg"))
+        store.move(listOf("x"), "y")
+        store.close()
+    }
+
+    @Test
+    fun theLockStateIsAlwaysSavedAtOneSize() {
+        val small = PlainPrefs.paddedJson(emptyMap())
+        val usual = PlainPrefs.paddedJson(mapOf("disguise" to "Default", "wipe_after" to "10", "failed" to "3"))
+        val full = PlainPrefs.paddedJson(
+            mapOf(
+                "disguise" to "Çalculator – ✓", "calc_facade" to "true", "calc_salt" to "ab".repeat(16), "calc_kdf" to "cd".repeat(32),
+                "auto_lock" to "300", "wipe_after" to "20", "failed" to "12", "failed_at" to "1794000000000",
+                "failed_since_boot" to "123456789", "failed_boot" to "42", "main_in_containers" to "true",
+            ),
+        )
+        assertEquals(2048, small.toByteArray().size)
+        assertEquals(2048, usual.toByteArray().size)
+        assertEquals(2048, full.toByteArray().size)
+        // It's still the same JSON map, which earlier versions read too.
+        val back = kotlinx.serialization.json.Json.decodeFromString<Map<String, String>>(usual)
+        assertEquals(mapOf("disguise" to "Default", "wipe_after" to "10", "failed" to "3"), back - "_pad")
+        // More than fits goes to the next size up, never over it.
+        assertEquals(4096, PlainPrefs.paddedJson(mapOf("k" to "v".repeat(3000))).toByteArray().size)
+    }
+
+    @Test
+    fun containersGetTheFixedTimeAtStart() {
+        val dir = tmp()
+        val a = File(dir, "0").apply { writeBytes(byteArrayOf(1)) }
+        val b = File(dir, "1").apply { writeBytes(byteArrayOf(2)) }
+        VaultManager.stampAll(dir)
+        assertEquals(VaultStore.FIXED_TIME, a.lastModified())
+        assertEquals(VaultStore.FIXED_TIME, b.lastModified())
+        assertEquals(VaultStore.FIXED_TIME, dir.lastModified())
+        VaultManager.stampAll(File(dir, "missing"))
+        assertFalse(File(dir, "missing").exists())
+    }
+
+    @Test
+    fun onlyEnclavesOwnWordingIsShownForAFailedImport() {
+        assertEquals(": " + VaultStore.NOT_STORED, VaultStore.reasonToShow(ImportProblem(VaultStore.NOT_STORED)))
+        assertEquals(": Storage is full", VaultStore.reasonToShow(StorageFullException()))
+        assertEquals("", VaultStore.reasonToShow(java.io.FileNotFoundException("/storage/emulated/0/DCIM/secret name.jpg (No such file)")))
+        assertEquals("", VaultStore.reasonToShow(IllegalStateException("anything")))
     }
 
     @Test

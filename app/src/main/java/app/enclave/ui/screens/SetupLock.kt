@@ -155,6 +155,8 @@ fun LockScreen() {
                         }
                         VaultActions.Outcome.Wrong -> error = "Wrong password or keyfile"
                         is VaultActions.Outcome.LockedOut -> lockout = outcome.ms
+                        VaultActions.Outcome.NotSaved ->
+                            error = "Nothing was tried: Enclave couldn't save its count of attempts. The phone's storage may be full. Free some space and try again."
                     }
                 }
             },

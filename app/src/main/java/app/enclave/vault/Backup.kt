@@ -253,6 +253,30 @@ object Backup {
     // ---- Restoring --------------------------------------------------------------------------
 
     /**
+     * A list of entries from a backup, made safe to show: a backup is only as trustworthy as
+     * whoever made it. An id is kept once; an entry whose parent isn't a folder in the list, or
+     * that is its own ancestor, loses its parent (and so lands in the restore folder). Nothing
+     * else is changed, so an honest backup comes through exactly as it was.
+     */
+    internal fun sound(list: List<Entry>): List<Entry> {
+        val ids = HashSet<String>()
+        val unique = list.filter { it.id.isNotEmpty() && ids.add(it.id) }
+        val folders = unique.filter { it.folder }.associateBy { it.id }
+        fun isOwnAncestor(e: Entry): Boolean {
+            val seen = HashSet<String>()
+            var cur = e.parent
+            while (cur != null && seen.add(cur)) {
+                if (cur == e.id) return true
+                cur = folders[cur]?.parent
+            }
+            return false
+        }
+        return unique.map { e ->
+            if (e.parent != null && (e.parent !in folders || isOwnAncestor(e))) e.copy(parent = null) else e
+        }
+    }
+
+    /**
      * Adds everything in the backup at [file] to [store], inside a new folder named [folderName]:
      * files keep their own keys and bytes, and get new ids so nothing collides. Returns the number
      * of files restored. If it fails part-way, nothing is added to the vault's list.
@@ -273,7 +297,12 @@ object Backup {
         val key = Kdf.derive(password, null, salt, KDF)
         DataInputStream(OpeningStream(input, key, prefix)).use { data ->
             val content = data.readLong()
-            val manifestBytes = ByteArray(data.readInt().also { if (it !in 1..(64 shl 20)) throw IOException("the backup file is damaged") })
+            val manifestSize = data.readInt().also { if (it !in 1..(64 shl 20)) throw IOException("the backup file is damaged") }
+            val manifestBytes = try {
+                ByteArray(manifestSize)
+            } catch (_: OutOfMemoryError) {
+                throw IOException("the backup file is damaged, or too big for this phone")
+            }
             data.readFully(manifestBytes)
             val manifest = json.decodeFromString<Manifest>(String(manifestBytes))
             manifestBytes.fill(0)
@@ -281,7 +310,15 @@ object Backup {
             if (manifest.v == 1) holdsMasterKey()
             val master = java.util.Base64.getDecoder().decode(manifest.master)
             var read = 8L + 4 + manifestBytes.size
-            fun readItem(size: Long): ByteArray = ByteArray(size.toInt()).also { data.readFully(it); read += size }
+            fun readItem(size: Long): ByteArray {
+                val bytes = try {
+                    ByteArray(size.toInt())
+                } catch (_: OutOfMemoryError) {
+                    throw IOException("the backup file is damaged, or too big for this phone")
+                }
+                data.readFully(bytes); read += size
+                return bytes
+            }
 
             var entries: List<Entry> = emptyList()
             val ids = HashMap<String, String>()
@@ -299,7 +336,7 @@ object Backup {
                                 plain = Aead.open(indexKey, plain)
                                 indexKey.fill(0)
                             }
-                            entries = json.decodeFromString<SavedIndex>(String(plain)).entries
+                            entries = sound(json.decodeFromString<SavedIndex>(String(plain)).entries)
                             plain.fill(0)
                             entries.forEach { ids[it.id] = Aead.hex(Aead.random(16)) }
                         }

@@ -68,6 +68,16 @@ object VaultManager {
         scratchDir.mkdirs()
         scratchDir.setLastModified(VaultStore.FIXED_TIME)
         removeEmptyVaultDirs(vaultsRoot)
+        // If Enclave was killed while unlocked, the containers written to since the last save
+        // still show when. Every unlock sets the fixed time again; so does every start.
+        stampAll(containersDir)
+    }
+
+    /** Gives a directory and everything directly in it the fixed modified time. */
+    internal fun stampAll(dir: File) {
+        val files = dir.listFiles() ?: return
+        files.forEach { it.setLastModified(VaultStore.FIXED_TIME) }
+        dir.setLastModified(VaultStore.FIXED_TIME)
     }
 
     /**

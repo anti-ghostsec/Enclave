@@ -158,7 +158,7 @@ fun FilesScreen(
 
     var importing by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var checking by remember { mutableStateOf<Pair<Int, Int>?>(null) }
-    var deleteOriginals by remember { mutableStateOf<List<File>>(emptyList()) }
+    var deleteOriginals by remember { mutableStateOf<List<Pair<File, Entry>>>(emptyList()) }
     var browseImport by remember { mutableStateOf(false) }
     var newFolder by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<Entry?>(null) }
@@ -180,33 +180,21 @@ fun FilesScreen(
     fun importAll(sources: List<Any>) {
         if (sources.isEmpty()) return
         scope.launch {
-            val doneFiles = mutableListOf<File>()
+            val doneFiles = mutableListOf<Pair<File, Entry>>()
             var done = 0
-            val added = mutableListOf<Pair<Any, Entry>>()
             sources.forEachIndexed { i, src ->
                 importing = i to sources.size
                 withContext(Dispatchers.IO) {
                     runCatching {
                         if (src is File) store.importFile(src, folder?.id) else store.import(ctx.contentResolver, src as Uri, folder?.id)
                     }
-                }.onSuccess { added += src to it }
-                    .onFailure { ctx.toast("Couldn't import a file: ${it.message}") }
+                }.onSuccess { done++; if (src is File) doneFiles += src to it }
+                    // Only Enclave's own wording: a system error can hold the file's path, and a
+                    // toast isn't covered by the screenshot block.
+                    .onFailure { ctx.toast("Couldn't import a file" + VaultStore.reasonToShow(it)) }
             }
-            // Each file was checked as it was stored. Now that all of them are saved, every one
-            // is read back once more: only a file that is whole in the vault counts as done, and
-            // only its original is offered for deletion.
-            val broken = mutableListOf<Entry>()
-            added.forEachIndexed { i, (src, e) ->
-                checking = i to added.size
-                val ok = withContext(Dispatchers.IO) { store.verify(e) }
-                if (ok) { done++; if (src is File) doneFiles += src } else broken += e
-            }
-            checking = null
             importing = null
-            if (broken.isNotEmpty() && store.isOpen) {
-                withContext(Dispatchers.IO) { runCatching { store.delete(broken.map { it.id }) } }
-                ctx.toast("${broken.size} file(s) didn't store correctly and were taken out of the vault. The originals are untouched: add them again.")
-            }
+            // Each file was read back and compared with its original before it was listed.
             if (doneFiles.isNotEmpty()) deleteOriginals = doneFiles
             else if (done > 0) ctx.toast("$done encrypted. Delete the originals from your Gallery app.")
         }
@@ -323,11 +311,11 @@ fun FilesScreen(
                 LinearProgressIndicator(progress = { if (n > 0) i.toFloat() / n else 0f }, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp))
             }
             importing?.let { (i, n) ->
-                val check = checking
-                Text(
-                    if (check != null) "Checking ${check.first + 1} of ${check.second}…" else "Encrypting ${i + 1} of $n…",
-                    Modifier.padding(horizontal = 16.dp),
-                )
+                Text("Encrypting ${i + 1} of $n…", Modifier.padding(horizontal = 16.dp))
+                LinearProgressIndicator(Modifier.fillMaxWidth().padding(16.dp))
+            }
+            checking?.let { (i, n) ->
+                Text("Checking ${i + 1} of $n before deleting its original…", Modifier.padding(horizontal = 16.dp))
                 LinearProgressIndicator(Modifier.fillMaxWidth().padding(16.dp))
             }
             if (children.isEmpty() && importing == null) {
@@ -487,7 +475,7 @@ fun FilesScreen(
             exporting = emptyList()
             scope.launch {
                 val n = withContext(Dispatchers.IO) { runCatching { store.exportTo(ids, dirs[0], ::freeName) }.getOrDefault(-1) }
-                if (n < 0) ctx.toast("Export failed") else ctx.toast("Exported $n decrypted file(s) to ${dirs[0].name}")
+                if (n < 0) ctx.toast("Export failed") else ctx.toast("Exported $n decrypted file(s)")
                 selected.clear()
             }
         }
@@ -504,10 +492,23 @@ fun FilesScreen(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    var failed = 0
-                    deleteOriginals.forEach { if (!it.delete()) failed++ }
-                    if (failed > 0) ctx.toast("$failed original(s) couldn't be deleted — remove them manually")
+                    val batch = deleteOriginals
                     deleteOriginals = emptyList()
+                    scope.launch {
+                        // Deleting can't be undone, so each file is read back from the vault once
+                        // more, now that everything is saved, right before its original goes.
+                        var failed = 0
+                        var kept = 0
+                        batch.forEachIndexed { i, (original, e) ->
+                            checking = i to batch.size
+                            val whole = withContext(Dispatchers.IO) { store.verify(e) }
+                            if (!whole) kept++
+                            else if (!withContext(Dispatchers.IO) { original.delete() }) failed++
+                        }
+                        checking = null
+                        if (kept > 0) ctx.toast("$kept file(s) couldn't be read back from the vault, so their originals were kept. Add them again.")
+                        if (failed > 0) ctx.toast("$failed original(s) couldn't be deleted — remove them manually")
+                    }
                 }) { Text("Delete originals") }
             },
             dismissButton = { TextButton(onClick = { deleteOriginals = emptyList() }) { Text("Keep") } },

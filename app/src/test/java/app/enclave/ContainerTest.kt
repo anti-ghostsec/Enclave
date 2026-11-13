@@ -412,6 +412,42 @@ class ContainerTest {
     }
 
     @Test
+    fun spaceWrittenJustBeforeACrashIsUsedAgain() {
+        val dir = newDir()
+        val master = Aead.random(32)
+        val keep = Aead.random(300_000)
+        segs(dir).use { s ->
+            val cs = ContainerStorage.create(s, master, migrated = true)
+            cs.putBytes("keep", keep); cs.saveIndex(byteArrayOf(1))
+            // Written and on the disk, but the power goes before any root lists it.
+            cs.putBytes("lost", Aead.random(1_000_000))
+            s.all.forEach { Native.flush(it.handle) }
+            s.all.forEach { Native.close(it.handle) }
+        }
+        val again = Aead.random(1_000_000)
+        val before = segs(dir).use { s ->
+            val cs = ContainerStorage.open(s, master, readOnly = false)!!
+            assertEquals(setOf("keep"), cs.names())
+            val used = cs.usage().first
+            assertTrue("the lost megabyte is inside the volume", used > 1_250_000)
+            cs.putBytes("again", again); cs.saveIndex(byteArrayOf(2))
+            assertTrue("it went into the lost space: ${cs.usage().first} after $used", cs.usage().first < used + 100_000)
+            assertArrayEquals(keep, cs.bytes("keep"))
+            assertArrayEquals(again, cs.bytes("again"))
+            cs.close()
+            used
+        }
+        assertSavedFreeListIsSound(dir, master)
+        segs(dir).use { s ->
+            val cs = ContainerStorage.open(s, master, readOnly = false)!!
+            assertArrayEquals(keep, cs.bytes("keep"))
+            assertArrayEquals(again, cs.bytes("again"))
+            assertTrue(cs.usage().first < before + 100_000)
+            cs.close()
+        }
+    }
+
+    @Test
     fun manyRoundsOfChangesAndReopeningKeepEveryFile() {
         val dir = newDir()
         val master = Aead.random(32)

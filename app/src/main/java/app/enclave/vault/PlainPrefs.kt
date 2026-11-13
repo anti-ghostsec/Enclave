@@ -14,7 +14,8 @@ import java.io.FileOutputStream
  * Settings that must be readable while the vault is locked (disguise, lock behaviour, lock-out
  * state). They're kept in one file sealed by a key in the phone's secure hardware ([StateKey]),
  * not in Android's plain preferences, so copying the app's files off the phone shows nothing:
- * not whether a disguise is on, nor anything about the calculator code.
+ * not whether a disguise is on, nor anything about the calculator code. What's sealed is filled
+ * up to a fixed size, so the file's length doesn't show which settings are in it either.
  */
 object PlainPrefs {
     private lateinit var app: Context
@@ -25,10 +26,45 @@ object PlainPrefs {
     fun init(c: Context) {
         app = c.applicationContext
         file = File(app.noBackupFilesDir, "state.bin")
-        if (file.exists()) {
-            runCatching { values += json.decodeFromString<Map<String, String>>(String(StateKey.open(file.readBytes()))) }
-        }
+        load()
         moveOldPreferences()
+    }
+
+    /**
+     * True while the state file is there but the hardware key that opens it isn't answering.
+     * Nothing is saved over the file then (it holds the count of wrong passwords and the wipe
+     * setting), and reading it is tried again each time something is asked for.
+     */
+    @Volatile private var unreadable = false
+
+    private fun decode(sealed: ByteArray): Map<String, String> =
+        json.decodeFromString<Map<String, String>>(String(StateKey.open(sealed))) - PAD
+
+    @Synchronized
+    private fun load() {
+        unreadable = false
+        if (!file.exists()) return
+        val saved = runCatching { decode(file.readBytes()) }.getOrNull()
+        if (saved != null) {
+            values.clear()
+            values += saved
+            return
+        }
+        // It can't be read. If the key works on something else, the file itself is damaged and
+        // there's nothing to wait for: start afresh, as before. If the key doesn't work (it can
+        // fail right after the phone starts), keep the file and try again later.
+        val probe = byteArrayOf(1, 2, 3)
+        unreadable = !runCatching { StateKey.open(StateKey.seal(probe)).contentEquals(probe) }.getOrDefault(false)
+    }
+
+    private const val PAD = "_pad"
+    private const val STATE_BLOCK = 2048
+
+    /** The state as JSON, filled up to a whole number of [STATE_BLOCK] bytes. */
+    internal fun paddedJson(state: Map<String, String>): String {
+        val bare = json.encodeToString(state + (PAD to "")).toByteArray().size
+        val target = (bare + STATE_BLOCK - 1) / STATE_BLOCK * STATE_BLOCK
+        return json.encodeToString(state + (PAD to "x".repeat(target - bare)))
     }
 
     /** Earlier versions kept these in plain Android preferences: seal them, then delete those. */
@@ -39,7 +75,7 @@ object PlainPrefs {
         all.forEach { (k, v) -> if (v != null && k !in values) values[k] = v.toString() }
         if (!persist()) return
         // Only once the sealed copy reads back correctly does the plain one go.
-        val check = runCatching { json.decodeFromString<Map<String, String>>(String(StateKey.open(file.readBytes()))) }.getOrNull()
+        val check = runCatching { decode(file.readBytes()) }.getOrNull()
         if (check == values) {
             old.edit().clear().commit()
             app.deleteSharedPreferences("enclave")
@@ -47,8 +83,8 @@ object PlainPrefs {
     }
 
     @Synchronized
-    private fun persist(): Boolean = runCatching {
-        val sealed = StateKey.seal(json.encodeToString(values.toMap()).toByteArray())
+    private fun persist(): Boolean = !unreadable && runCatching {
+        val sealed = StateKey.seal(paddedJson(values.toMap()).toByteArray())
         val tmp = File(file.path + ".tmp")
         FileOutputStream(tmp).use { it.write(sealed); it.fd.sync() }
         if (!tmp.renameTo(file)) {
@@ -57,12 +93,26 @@ object PlainPrefs {
         file.setLastModified(VaultStore.FIXED_TIME)
     }.isSuccess
 
-    private fun get(k: String): String? = synchronized(this) { values[k] }
+    private fun get(k: String): String? = synchronized(this) {
+        if (unreadable) load()
+        values[k]
+    }
 
     private fun set(k: String, v: String?) {
-        synchronized(this) { if (v == null) values.remove(k) else values[k] = v }
+        synchronized(this) {
+            if (unreadable) load()
+            if (v == null) values.remove(k) else values[k] = v
+        }
         persist()
     }
+
+    /**
+     * Set once the real vault has been opened from the containers. If it's then not found there
+     * one day, that's damage, not a new vault, and nothing must be made in its place.
+     */
+    var mainInContainers: Boolean
+        get() = get("main_in_containers").toBoolean()
+        set(v) { if (v != mainInContainers) set("main_in_containers", if (v) "true" else null) }
 
     var disguise: String
         get() = get("disguise") ?: "Default"
@@ -128,6 +178,7 @@ object PlainPrefs {
      * as many guesses as anyone likes. The real password clears the count with [resetFailures].
      */
     fun beginAttempt(): Attempt? = synchronized(this) {
+        if (unreadable) load()
         val before = attemptKeys.associateWith { values[it] }
         val counted = (failedAttempts + 1).toString()
         values["failed"] = counted

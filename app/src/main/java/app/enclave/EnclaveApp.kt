@@ -23,6 +23,17 @@ class EnclaveApp : Application() {
     /** When the vault is due to lock, in time since boot (which keeps counting in sleep); 0 = not set. */
     @Volatile private var lockDue = 0L
 
+    /** How far time since boot was ahead of time awake when Enclave left the screen; -1 = not set. */
+    @Volatile private var sleptAtStop = -1L
+
+    /** Time the phone has spent asleep since boot. It only grows while the screen is off. */
+    private fun slept() = android.os.SystemClock.elapsedRealtime() - android.os.SystemClock.uptimeMillis()
+
+    private fun lockNow() {
+        Session.lock()
+        Shares.clear()
+    }
+
     override fun onCreate() {
         super.onCreate()
         PlainPrefs.init(this)
@@ -40,11 +51,21 @@ class EnclaveApp : Application() {
                 val due = lockDue
                 lockDue = 0
                 if (due != 0L && android.os.SystemClock.elapsedRealtime() >= due) Session.lock()
+                // The "screen off" message can be dropped while Enclave is frozen in the
+                // background. If the phone slept since Enclave left, the screen was off: lock as
+                // that message would have.
+                val before = sleptAtStop
+                sleptAtStop = -1
+                if (before >= 0 && slept() - before > 1000) lockNow()
                 Session.cameBack()
             }
 
             override fun onStop(owner: LifecycleOwner) {
                 handler.removeCallbacks(lock)
+                sleptAtStop = slept()
+                // Leaving because the screen turned off: don't wait for the message.
+                val power = getSystemService(android.os.PowerManager::class.java)
+                if (power != null && !power.isInteractive) lockNow()
                 val delay = Session.lockDelayMs(app.enclave.vault.VaultActions.autoLockSeconds() * 1000L)
                 lockDue = android.os.SystemClock.elapsedRealtime() + delay
                 handler.postDelayed(lock, delay)

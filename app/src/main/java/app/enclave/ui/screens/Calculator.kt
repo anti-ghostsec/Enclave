@@ -18,6 +18,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -25,6 +26,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.enclave.vault.PlainPrefs
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.math.BigDecimal
 import java.math.MathContext
 import java.math.RoundingMode
@@ -34,16 +38,23 @@ import java.math.RoundingMode
 fun CalculatorScreen(onSecret: () -> Unit) {
     var expr by remember { mutableStateOf("") }
     var result by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
 
     fun press(k: String) {
         when (k) {
             "C" -> { expr = ""; result = "" }
             "⌫" -> expr = expr.dropLast(1)
             "=" -> {
-                if (expr.isNotEmpty() && expr.all { it.isDigit() } && PlainPrefs.checkCalculatorCode(expr)) {
-                    expr = ""; result = ""
-                    onSecret()
-                    return
+                // The code is checked in the background while the sum shows at once, as for any
+                // other "=": a pause on plain numbers only would give the front away.
+                if (expr.isNotEmpty() && expr.all { it.isDigit() }) {
+                    val code = expr
+                    scope.launch {
+                        if (withContext(Dispatchers.Default) { PlainPrefs.checkCalculatorCode(code) }) {
+                            expr = ""; result = ""
+                            onSecret()
+                        }
+                    }
                 }
                 result = evaluate(expr) ?: "Error"
                 if (result != "Error") expr = result

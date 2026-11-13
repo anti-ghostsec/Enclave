@@ -68,6 +68,9 @@ data class VaultSettings(
     val confirmShare: Boolean = true,
 )
 
+/** An import that Enclave itself refused, with a message that's safe to show. */
+class ImportProblem(message: String) : java.io.IOException(message)
+
 @Serializable
 private data class Index(val entries: List<Entry> = emptyList())
 
@@ -145,7 +148,7 @@ class VaultStore(
         try {
             storage.saveIndex(Aead.seal(indexKey, json.encodeToString(Index(after)).toByteArray()))
         } catch (e: java.io.IOException) {
-            problem.value = e.message ?: "Couldn't save"
+            problem.value = shown(e)
             return false
         }
         _entries.value = after
@@ -160,12 +163,16 @@ class VaultStore(
         try {
             storage.saveSettings(Aead.seal(settingsKey, json.encodeToString(s).toByteArray()))
         } catch (e: java.io.IOException) {
-            problem.value = e.message ?: "Couldn't save"
+            problem.value = shown(e)
             return false
         }
         _settings.value = s
         return true
     }
+
+    /** A save's error as the UI may show it: the system's "file not found" text holds a path. */
+    private fun shown(e: java.io.IOException) =
+        if (e is java.io.FileNotFoundException) "Couldn't save" else e.message ?: "Couldn't save"
 
     private fun newId() = Aead.hex(Aead.random(16))
     private fun keyOf(e: Entry) = Base64.decode(e.key, Base64.NO_WRAP)
@@ -213,9 +220,9 @@ class VaultStore(
             val read = MessageDigest.getInstance("SHA-256")
             val size = writeBlob(id, key) { DigestInputStream(open(), read) }
             val sourceHash = read.digest()
-            if (size < expectedSize) throw java.io.IOException("the file ended early ($size of $expectedSize bytes); nothing was added")
+            if (size < expectedSize) throw ImportProblem("the file ended early ($size of $expectedSize bytes); nothing was added")
             val stored = runCatching { storedHash(id, key, size) }.getOrNull()
-            if (stored == null || !MessageDigest.isEqual(stored, sourceHash)) throw java.io.IOException(NOT_STORED)
+            if (stored == null || !MessageDigest.isEqual(stored, sourceHash)) throw ImportProblem(NOT_STORED)
             writeThumb(id, key, null, THUMB_PENDING)
             val e = Entry(id, parent, name, false, size, mime, System.currentTimeMillis(), Base64.encodeToString(key, Base64.NO_WRAP))
             if (!updateEntries { it + e }) error(problem.value ?: "vault is locked")
@@ -484,7 +491,9 @@ class VaultStore(
     /** True if [id] is [ancestor] or lives somewhere inside it. */
     fun isWithin(id: String?, ancestor: String): Boolean {
         var cur = id
-        while (cur != null) {
+        // Folders that contain each other (only a damaged list has them) must not loop for ever.
+        val seen = HashSet<String>()
+        while (cur != null && seen.add(cur)) {
             if (cur == ancestor) return true
             cur = _entries.value.firstOrNull { it.id == cur }?.parent
         }
@@ -500,7 +509,8 @@ class VaultStore(
     fun pathOf(e: Entry): String {
         val parts = mutableListOf(e.name)
         var cur = e.parent
-        while (cur != null) {
+        val seen = HashSet<String>()
+        while (cur != null && seen.add(cur)) {
             val p = _entries.value.firstOrNull { it.id == cur } ?: break
             parts.add(0, p.name); cur = p.parent
         }
@@ -570,6 +580,15 @@ class VaultStore(
         private const val SHARE_IN_MEMORY = 64L * 1024 * 1024
         private const val THUMB_PENDING = 0
         private const val THUMB_NONE = -1
+        /**
+         * What may be shown about a failed import in a message other apps' screenshots could
+         * catch: Enclave's own wording, never a system error (those can hold a file's path).
+         */
+        fun reasonToShow(t: Throwable): String = when (t) {
+            is ImportProblem, is StorageFullException -> ": ${t.message}"
+            else -> ""
+        }
+
         const val NOT_STORED = "the file didn't store correctly and wasn't added; the original is untouched, try again"
     }
 }

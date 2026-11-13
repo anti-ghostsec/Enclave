@@ -8,13 +8,20 @@ object VaultActions {
         data object Opened : Outcome
         data object Wrong : Outcome
         data class LockedOut(val ms: Long) : Outcome
+        /** The count of attempts couldn't be saved (storage full, say), so nothing was tried. */
+        data object NotSaved : Outcome
     }
 
+    /**
+     * One attempt at a time, whichever screen it comes from: two started together would both
+     * pass the lock-out check before either was counted.
+     */
+    @Synchronized
     fun unlock(password: CharArray, keyfileSecret: ByteArray?): Outcome {
         PlainPrefs.lockoutRemainingMs().let { if (it > 0) return Outcome.LockedOut(it) }
         // The attempt is counted, on the disk, before the password is tried. If the count can't
         // be saved, nothing is tried.
-        val attempt = PlainPrefs.beginAttempt() ?: return Outcome.LockedOut(PlainPrefs.UNSAVED_WAIT_MS)
+        val attempt = PlainPrefs.beginAttempt() ?: return Outcome.NotSaved
         // Duress passwords never use a keyfile, so with a keyfile selected the password is also
         // tried without it. Both are always tried, so a duress password takes exactly as long as
         // the real one and the time taken gives nothing away.
@@ -26,8 +33,9 @@ object VaultActions {
             val max = PlainPrefs.wipeAfterFailures
             if (max > 0 && PlainPrefs.failedAttempts >= max) {
                 // Destroy everything, but look exactly as before: the lock screen stays, and
-                // from now on every password is simply "wrong".
-                wipeEverything()
+                // from now on every password is simply "wrong". The count of wrong passwords
+                // stays too, so the lock-out goes on growing as it would have.
+                wipeEverything(keepCount = true)
                 VaultManager.createUnopenable()
             }
             return Outcome.Wrong
@@ -75,11 +83,12 @@ object VaultActions {
         if (s.role == Role.MAIN) PlainPrefs.autoLockSeconds = n else s.sessionAutoLock = n
     }
 
-    fun wipeEverything() {
+    fun wipeEverything(keepCount: Boolean = false) {
         Shares.clear()
         Session.lock()
         VaultManager.wipeAll()
-        PlainPrefs.resetFailures()
+        PlainPrefs.mainInContainers = false
+        if (!keepCount) PlainPrefs.resetFailures()
     }
 
     /**

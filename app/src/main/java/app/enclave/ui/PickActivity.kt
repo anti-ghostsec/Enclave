@@ -20,11 +20,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.enclave.disguise.Disguise
+import app.enclave.ui.screens.CalculatorScreen
 import app.enclave.ui.screens.FilesScreen
 import app.enclave.ui.screens.LockScreen
 import app.enclave.ui.screens.PickRequest
 import app.enclave.ui.screens.ViewerScreen
 import app.enclave.vault.Entry
+import app.enclave.vault.PlainPrefs
 import app.enclave.vault.Session
 import app.enclave.vault.Shares
 import app.enclave.vault.VaultManager
@@ -51,8 +53,12 @@ class PickActivity : ComponentActivity() {
                     var viewing by remember { mutableStateOf<Pair<List<Entry>, Int>?>(null) }
                     val s = unlocked
                     var focus by remember { mutableStateOf<String?>(null) }
-                    if (s == null) LockScreen()
-                    else Box(Modifier.fillMaxSize()) {
+                    // With the calculator front on, it stands in front of the password here too.
+                    var facadePassed by remember { mutableStateOf(false) }
+                    if (s == null) {
+                        if (PlainPrefs.calculatorFacade && !facadePassed) CalculatorScreen(onSecret = { facadePassed = true })
+                        else LockScreen()
+                    } else Box(Modifier.fillMaxSize()) {
                         Box(Modifier.systemBarsPadding()) {
                             FilesScreen(
                                 s.store,

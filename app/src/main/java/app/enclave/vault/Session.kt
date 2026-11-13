@@ -107,7 +107,13 @@ object Session {
             return
         }
 
-        val existing = ContainerStorage.open(segs, r.master, readOnly = false)
+        val existing = try {
+            ContainerStorage.open(segs, r.master, readOnly = false)
+        } catch (e: Exception) {
+            // Found, but damaged. Shown empty, and nothing is written: making a new vault here
+            // would write over whatever is left of this one.
+            return unreadable(r)
+        }
         when {
             existing != null && existing.migrated -> {
                 // A move that finished but was cut off before tidying up.
@@ -129,12 +135,23 @@ object Session {
                 // Unfinished move with no old directory left: nothing else to copy from.
                 ready(r, existing, finishMove = true)
             }
+            // This vault has been opened from these containers before and now isn't in them:
+            // that is damage, not a new vault.
+            segs.all.isNotEmpty() && PlainPrefs.mainInContainers -> unreadable(r)
             // Containers are already here (kept through a wipe): a new vault in them takes no
             // longer than opening one, so no screen that would show a vault was just made.
             segs.all.isNotEmpty() -> ready(r, ContainerStorage.create(segs, r.master, migrated = true))
             else -> background(r, "Preparing secure storage") { ContainerStorage.create(segs, r.master, migrated = true) }
         }
     }
+
+    /** Opens an empty vault that can't be written, with a message, in place of one that can't be read. */
+    private fun unreadable(r: UnlockResult) {
+        ready(r, EmptyStorage())
+        _state.value?.store?.problem?.value = UNREADABLE
+    }
+
+    const val UNREADABLE = "The vault's data couldn't be read, so it's shown empty. Nothing was changed. Lock and try again."
 
     /** Runs a slow step, then opens the vault. If the move fails, the old format is used as before. */
     private fun background(r: UnlockResult, title: String, work: () -> Storage) {
@@ -200,6 +217,7 @@ object Session {
                 if (finishMove) storage.finishMigration()
             }
         }
+        if (storage is ContainerStorage && r.role == Role.MAIN) runCatching { PlainPrefs.mainInContainers = true }
         _state.value = Unlocked(r.role, r.slot, r.master, store)
         // Quietly bring old-format files up to date (padding, fixed-size previews).
         thread(name = "enclave-upgrade", isDaemon = true) { runCatching { store.upgradeOldFiles() } }
