@@ -88,6 +88,43 @@ data class Extent(val s: Int, val o: Long, val n: Long)
 @Serializable
 data class StoredBlob(val size: Long, val ext: List<Extent>)
 
+/** [list] in order, with empty or impossible extents dropped and overlapping or touching ones joined. */
+internal fun mergeExtents(list: Collection<Extent>): List<Extent> {
+    val sorted = list.filter { it.n > 0 && it.o >= 0 && it.o + it.n > it.o }.sortedWith(compareBy({ it.s }, { it.o }))
+    val out = ArrayList<Extent>(sorted.size)
+    for (e in sorted) {
+        val last = out.lastOrNull()
+        if (last != null && last.s == e.s && last.o + last.n >= e.o) {
+            out[out.lastIndex] = last.copy(n = maxOf(last.o + last.n, e.o + e.n) - last.o)
+        } else out += e
+    }
+    return out
+}
+
+/** What is left of [from] once every byte of [used] is taken out of it. */
+internal fun subtractExtents(from: Collection<Extent>, used: Collection<Extent>): List<Extent> {
+    val free = mergeExtents(from)
+    val taken = mergeExtents(used)
+    if (taken.isEmpty()) return free
+    val out = ArrayList<Extent>(free.size)
+    var j = 0
+    for (f in free) {
+        var start = f.o
+        val end = f.o + f.n
+        // Skip what lies wholly before this extent (and so before every later one too).
+        while (j < taken.size && (taken[j].s < f.s || (taken[j].s == f.s && taken[j].o + taken[j].n <= start))) j++
+        var k = j
+        while (k < taken.size && taken[k].s == f.s && taken[k].o < end) {
+            val t = taken[k]
+            if (t.o > start) out += Extent(f.s, start, t.o - start)
+            start = maxOf(start, t.o + t.n)
+            k++
+        }
+        if (start < end) out += Extent(f.s, start, end - start)
+    }
+    return out
+}
+
 /** Everything a vault needs to find its data, sealed with a key from its master key. */
 @Serializable
 private data class Root(
@@ -194,10 +231,30 @@ class ContainerStorage private constructor(
         var i = 0
         while (i < free.size - 1) {
             val a = free[i]; val b = free[i + 1]
-            if (a.s == b.s && a.o + a.n == b.o) {
-                free[i] = a.copy(n = a.n + b.n); free.removeAt(i + 1)
+            if (a.s == b.s && a.o + a.n >= b.o) {
+                free[i] = a.copy(n = maxOf(a.o + a.n, b.o + b.n) - a.o); free.removeAt(i + 1)
             } else i++
         }
+    }
+
+    /**
+     * Takes the free list of a saved root, trusting none of it. Versions up to 0.5.1 could save a
+     * root that listed its own place as free, and after that a file's too. Whatever the saved
+     * root or one of its files uses is taken out, overlapping entries are joined, and entries
+     * outside this vault's volumes are dropped, so such a vault stops getting worse.
+     */
+    private fun loadFree(saved: List<Extent>) {
+        val used = listOfNotNull(rootExtent) + files.values.flatMap { it.ext }
+        val usable = saved.filter { vol.containsKey(it.s) }.mapNotNull { e ->
+            // The volume's first block holds the header, never data.
+            val o = maxOf(e.o, DATA_START)
+            val n = e.o + e.n - o
+            if (e.o < 0 || e.n <= 0 || n <= 0) null else Extent(e.s, o, n)
+        }
+        free.clear()
+        free += subtractExtents(usable, used)
+        // A volume never ends before something in it that's used or free: new space starts after.
+        for (e in used + free) ends[e.s]?.let { end -> if (e.n > 0 && e.o + e.n > end) ends[e.s] = e.o + e.n }
     }
 
     /** Gives back the unused tail of an extent that nothing references yet. */
@@ -383,28 +440,55 @@ class ContainerStorage private constructor(
         for (s in vol.keys) if (s != home && (unflushed[s] ?: 0) > 0) {
             Native.flush(handle(s)); unflushed[s] = 0
         }
-        // 2. The new root, into space no saved root uses, in the home volume.
+        // 2. The new root, into space no saved root uses, in the home volume. Its place is chosen
+        // before the root is written out, because the root lists the free space: the place it
+        // goes to must not be in that list, or the next unlock would hand it out again.
         val old = rootExtent
-        val persistedFree = (free + pending + listOfNotNull(old))
-        val root = Root(
-            migrated = migratedFlag,
-            index = index?.let { Base64.getEncoder().encodeToString(it) },
-            settings = settings?.let { Base64.getEncoder().encodeToString(it) },
-            files = files.toMap(),
-            free = persistedFree,
-        )
-        val sealed = Aead.seal(rootKey, json.encodeToString(root).toByteArray())
-        val need = sealed.size.toLong()
-        val spot = free.firstOrNull { it.s == home && it.n >= need }
-        val at = if (spot != null) {
-            free.remove(spot)
-            if (spot.n > need) free += spot.copy(o = spot.o + need, n = spot.n - need)
-            Extent(home, spot.o, need)
-        } else {
-            val end = ends.getValue(home)
-            ends[home] = end + need
-            Extent(home, end, need)
+        val releasing = pending + listOfNotNull(old)
+        val live = files.values.flatMap { it.ext }
+        val indexText = index?.let { Base64.getEncoder().encodeToString(it) }
+        val settingsText = settings?.let { Base64.getEncoder().encodeToString(it) }
+        // What the saved root may call free: never a byte of a file it lists.
+        fun freeOnceSaved(freeNow: List<Extent>) = subtractExtents(freeNow + releasing, live)
+        fun rootJson(freeList: List<Extent>) = json.encodeToString(
+            Root(migrated = migratedFlag, index = indexText, settings = settingsText, files = files.toMap(), free = freeList),
+        ).toByteArray()
+        val sealing = (Aead.NONCE_BYTES + Aead.TAG_BYTES).toLong()
+
+        var body: ByteArray? = null
+        var savedFree: List<Extent> = emptyList()
+        var at: Extent? = null
+        var slack: Extent? = null
+        // Taking a place out of the free list changes the list, and so the root's size, by a few
+        // digits: set aside a little more than the size it has with the list as it is now.
+        val reserve = rootJson(freeOnceSaved(free)).size + sealing + ROOT_SLACK
+        val spot = free.firstOrNull { it.s == home && it.n >= reserve }
+        if (spot != null) {
+            val reserved = Extent(home, spot.o, reserve)
+            val rest = subtractExtents(free, listOf(reserved))
+            val list = freeOnceSaved(rest)
+            val b = rootJson(list)
+            val need = b.size + sealing
+            // Checked, not assumed: the root fits, and nothing it calls free touches its place.
+            if (need <= reserve && subtractExtents(list, listOf(reserved)) == list) {
+                free.clear(); free += rest
+                body = b; savedFree = list
+                at = Extent(home, spot.o, need)
+                slack = Extent(home, spot.o + need, reserve - need)
+            }
         }
+        if (at == null) {
+            val end = ends.getValue(home)
+            // The root goes to the end of the volume: nothing free may reach that far.
+            val list = subtractExtents(freeOnceSaved(free), listOf(Extent(home, end, Long.MAX_VALUE - end)))
+            val b = rootJson(list)
+            val need = b.size + sealing
+            ends[home] = end + need
+            body = b; savedFree = list
+            at = Extent(home, end, need)
+        }
+        val sealed = Aead.seal(rootKey, body!!)
+        check(sealed.size.toLong() == at.n) { "root size" }
         volWrite(home, at.o, sealed, 0, sealed.size)
         volWrite(home, 0, header(SAVED, at), 0, HEADER_BYTES)
         // 3. The crate saves the home volume atomically: the old root stays valid until now.
@@ -412,9 +496,11 @@ class ContainerStorage private constructor(
         unflushed[home] = 0
         segs.stamp()
         rootExtent = at
-        pending.forEach(::addFree)
+        // From here on the free space is exactly what the saved root says (plus what was set
+        // aside for the root and not needed): the old root and replaced files are free at last.
+        free.clear(); free += savedFree
         pending.clear()
-        old?.let(::addFree)
+        slack?.let(::addFree)
         dirty = false
     }
 
@@ -462,6 +548,8 @@ class ContainerStorage private constructor(
         private const val CHUNK = 8L * 1024 * 1024
         private const val MIN_EXTENT = 64L * 1024
         private const val HOME_RESERVE = 32L * 1024 * 1024
+        /** Extra bytes set aside for a root placed in free space (see [commit]). */
+        private const val ROOT_SLACK = 64L
 
         fun volumeKey(master: ByteArray) = Aead.subkey(master, "deniable volume")
         fun rootKey(master: ByteArray) = Aead.subkey(master, "container root")
@@ -491,7 +579,7 @@ class ContainerStorage private constructor(
             cs.index = root.index?.let { Base64.getDecoder().decode(it) }
             cs.settings = root.settings?.let { Base64.getDecoder().decode(it) }
             cs.files.putAll(root.files)
-            root.free.forEach(cs::addFree)
+            cs.loadFree(root.free)
             return cs
         }
 
