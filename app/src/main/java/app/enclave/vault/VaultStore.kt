@@ -79,7 +79,15 @@ private data class Index(val entries: List<Entry> = emptyList())
  * minimum: blobs are padded (Padmé), every preview file has one fixed size, and every file's
  * modified time is the same fixed date. Inside containers none of that is visible at all.
  */
-class VaultStore(val storage: Storage, master: ByteArray) {
+class VaultStore(
+    val storage: Storage,
+    master: ByteArray,
+    /**
+     * Runs once the settings are read and before this vault writes anything at all (tidying up
+     * after a crash writes). The real vault uses it to keep its decoys' space safe first.
+     */
+    beforeWriting: (VaultSettings) -> Unit = {},
+) {
     constructor(dir: File, master: ByteArray) : this(DirStorage(dir), master)
 
     private val indexKey = Aead.subkey(master, "index")
@@ -108,6 +116,7 @@ class VaultStore(val storage: Storage, master: ByteArray) {
     init {
         storage.loadIndex()?.let { _entries.value = json.decodeFromString<Index>(String(Aead.open(indexKey, it))).entries }
         storage.loadSettings()?.let { _settings.value = json.decodeFromString(String(Aead.open(settingsKey, it))) }
+        beforeWriting(_settings.value)
         if (!storage.readOnly) removeLeftovers()
     }
 

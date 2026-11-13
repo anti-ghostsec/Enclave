@@ -195,9 +195,14 @@ fun openDecoyForFilling(d: DuressSlot): VaultStore? {
     val m = java.util.Base64.getDecoder().decode(d.master ?: return null)
     return try {
         val cs = ContainerStorage.open(segs, m, readOnly = false) ?: return null
-        // Count the real vault's space too, so filling the decoy never writes over it.
-        cs.protect(ContainerStorage.volumeKey(s.master))
-        VaultStore(cs, m)
+        // Count the real vault's space too, so filling the decoy never writes over it, and do
+        // it before the decoy's own tidying up can write.
+        VaultStore(cs, m) { cs.protect(ContainerStorage.volumeKey(s.master)) }
+    } catch (_: java.io.IOException) {
+        // Too damaged to open.
+        null
+    } catch (_: java.security.GeneralSecurityException) {
+        null
     } finally {
         m.fill(0)
     }

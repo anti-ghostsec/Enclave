@@ -98,8 +98,7 @@ object Session {
             // containers never writes to them: with only it unlocked, a write could land on the
             // hidden real vault, which this session can't see. Changes look like they work and
             // are kept in memory until it locks, so nothing gives the decoy away.
-            val storage = old
-                ?: SessionOnlyStorage(ContainerStorage.open(segs, r.master, readOnly = true) ?: EmptyStorage(), VaultManager.scratchDir)
+            val storage = old ?: SessionOnlyStorage(decoyStorage(segs, r.master), VaultManager.scratchDir)
             ready(r, storage)
             return
         }
@@ -124,8 +123,7 @@ object Session {
             }
             existing != null -> {
                 // Unfinished move with no old directory left: nothing else to copy from.
-                existing.finishMigration()
-                ready(r, existing)
+                ready(r, existing, finishMove = true)
             }
             // Containers are already here (kept through a wipe): a new vault in them takes no
             // longer than opening one, so no screen that would show a vault was just made.
@@ -163,14 +161,39 @@ object Session {
         }
     }
 
-    private fun ready(r: UnlockResult, storage: Storage) {
-        val store = VaultStore(storage, r.master)
-        if (storage is ContainerStorage && r.role == Role.MAIN) {
-            // Keep decoys in the containers open, so this vault never writes over them.
-            store.settings.value.duress.mapNotNull { it.master }.forEach { m ->
-                val key = Base64.getDecoder().decode(m)
-                storage.protect(ContainerStorage.volumeKey(key))
-                key.fill(0)
+    /**
+     * A decoy's storage in the containers, opened alone: read-only. One that is missing or too
+     * damaged to read is an empty vault, never an error: nothing may tell it from a vault that
+     * simply has nothing in it.
+     */
+    internal fun decoyStorage(segs: Segments, master: ByteArray): Storage =
+        runCatching { ContainerStorage.open(segs, master, readOnly = true) }.getOrNull() ?: EmptyStorage()
+
+    /** Keeps the decoys listed in the real vault's settings open, so it never writes over them. */
+    internal fun protectDecoys(storage: ContainerStorage, settings: VaultSettings) {
+        settings.duress.mapNotNull { it.master }.forEach { m ->
+            // One that can't be protected (damaged, or a bad entry) never stops the vault opening.
+            runCatching {
+                val master = Base64.getDecoder().decode(m)
+                val key = ContainerStorage.volumeKey(master)
+                master.fill(0)
+                try {
+                    storage.protect(key)
+                } finally {
+                    key.fill(0)
+                }
+            }
+        }
+    }
+
+    private fun ready(r: UnlockResult, storage: Storage, finishMove: Boolean = false) {
+        // Decoys are protected before the real vault can write: opening it tidies up after a
+        // crash, and that save would otherwise land on blocks that look free only because the
+        // decoys aren't open yet.
+        val store = VaultStore(storage, r.master) { settings ->
+            if (storage is ContainerStorage && r.role == Role.MAIN) {
+                protectDecoys(storage, settings)
+                if (finishMove) storage.finishMigration()
             }
         }
         _state.value = Unlocked(r.role, r.slot, r.master, store)

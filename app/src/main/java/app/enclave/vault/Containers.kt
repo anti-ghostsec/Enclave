@@ -302,7 +302,7 @@ class ContainerStorage private constructor(
         Native.write(s.handle, v, 0, header(0, null), 0, HEADER_BYTES)
         ends[s.index] = DATA_START
         unflushed[s.index] = HEADER_BYTES.toLong()
-        protectedKeys.forEach { k -> Native.unlock(s.handle, k).takeIf { it >= 0 }?.let { others.getOrPut(s.index) { mutableListOf() } += it } }
+        protectedKeys.forEach { k -> keepOpen(s, k) }
         dirty = true
     }
 
@@ -538,12 +538,25 @@ class ContainerStorage private constructor(
         commit()
     }
 
-    /** Keeps other vaults' volumes (decoys) open so this vault never writes over them. */
+    /**
+     * Keeps other vaults' volumes (decoys) open so this vault never writes over them. Call it
+     * before this vault writes anything. A volume too damaged to open can't be kept safe any
+     * more, and is passed over: a broken decoy must never stop the real vault from opening.
+     */
     @Synchronized
     fun protect(key: ByteArray) {
         if (protectedKeys.any { it.contentEquals(key) }) return
         protectedKeys += key.copyOf()
-        for (s in segs.all) Native.unlock(s.handle, key).takeIf { it >= 0 }?.let { others.getOrPut(s.index) { mutableListOf() } += it }
+        for (s in segs.all) keepOpen(s, key)
+    }
+
+    private fun keepOpen(s: Segments.Segment, key: ByteArray) {
+        val v = try {
+            Native.unlock(s.handle, key)
+        } catch (_: IOException) {
+            -1
+        }
+        if (v >= 0) others.getOrPut(s.index) { mutableListOf() }.let { if (v !in it) it += v }
     }
 
     /** Bytes this vault occupies, and the total size of its containers. */
