@@ -152,17 +152,19 @@ class VaultStore(
         return true
     }
 
+    /** Changes the settings. Returns false if they couldn't be saved (see [problem]). */
     @Synchronized
-    fun updateSettings(f: (VaultSettings) -> VaultSettings) {
-        if (closed) return
+    fun updateSettings(f: (VaultSettings) -> VaultSettings): Boolean {
+        if (closed) return false
         val s = f(_settings.value)
         try {
             storage.saveSettings(Aead.seal(settingsKey, json.encodeToString(s).toByteArray()))
         } catch (e: java.io.IOException) {
             problem.value = e.message ?: "Couldn't save"
-            return
+            return false
         }
         _settings.value = s
+        return true
     }
 
     private fun newId() = Aead.hex(Aead.random(16))

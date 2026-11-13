@@ -12,6 +12,9 @@ object VaultActions {
 
     fun unlock(password: CharArray, keyfileSecret: ByteArray?): Outcome {
         PlainPrefs.lockoutRemainingMs().let { if (it > 0) return Outcome.LockedOut(it) }
+        // The attempt is counted, on the disk, before the password is tried. If the count can't
+        // be saved, nothing is tried.
+        val attempt = PlainPrefs.beginAttempt() ?: return Outcome.LockedOut(PlainPrefs.UNSAVED_WAIT_MS)
         // Duress passwords never use a keyfile, so with a keyfile selected the password is also
         // tried without it. Both are always tried, so a duress password takes exactly as long as
         // the real one and the time taken gives nothing away.
@@ -20,7 +23,6 @@ object VaultActions {
         val r = withKeyfile ?: without
         if (withKeyfile != null) without?.master?.let(Aead::wipe)
         if (r == null) {
-            PlainPrefs.recordFailure()
             val max = PlainPrefs.wipeAfterFailures
             if (max > 0 && PlainPrefs.failedAttempts >= max) {
                 // Destroy everything, but look exactly as before: the lock screen stays, and
@@ -30,7 +32,10 @@ object VaultActions {
             }
             return Outcome.Wrong
         }
-        PlainPrefs.resetFailures()
+        // Only the real vault's password clears the count of wrong ones. A decoy or duress
+        // password leaves it where it was: otherwise whoever holds one could guess at the real
+        // password a few at a time for ever, with no lock-out and no wipe.
+        if (r.role == Role.MAIN) PlainPrefs.resetFailures() else PlainPrefs.cancelAttempt(attempt)
         when (r.role) {
             Role.MAIN, Role.DECOY -> Session.open(r)
             Role.WIPE -> {
@@ -42,6 +47,32 @@ object VaultActions {
             }
         }
         return Outcome.Opened
+    }
+
+    /**
+     * The lock settings as this session sees and changes them. They belong to the phone, not to
+     * one vault, so only the real vault may change them: from a decoy, "wipe after wrong
+     * passwords" could otherwise be switched off before guessing at the real password. A decoy
+     * is shown the defaults, and what it sets lasts until it locks, like everything else there.
+     */
+    fun wipeAfterFailures(): Int {
+        val s = Session.current
+        return if (s == null || s.role == Role.MAIN) PlainPrefs.wipeAfterFailures else s.sessionWipeAfter
+    }
+
+    fun setWipeAfterFailures(n: Int) {
+        val s = Session.current ?: return
+        if (s.role == Role.MAIN) PlainPrefs.wipeAfterFailures = n else s.sessionWipeAfter = n
+    }
+
+    fun autoLockSeconds(): Int {
+        val s = Session.current
+        return if (s == null || s.role == Role.MAIN) PlainPrefs.autoLockSeconds else s.sessionAutoLock
+    }
+
+    fun setAutoLockSeconds(n: Int) {
+        val s = Session.current ?: return
+        if (s.role == Role.MAIN) PlainPrefs.autoLockSeconds = n else s.sessionAutoLock = n
     }
 
     fun wipeEverything() {
@@ -99,7 +130,7 @@ object VaultActions {
         return true
     }
 
-    enum class Added { OK, IN_USE, NO_SLOTS }
+    enum class Added { OK, IN_USE, NO_SLOTS, FAILED }
 
     /** Adds a duress password. */
     fun addDuress(password: CharArray, action: String, label: String): Added {
@@ -134,9 +165,26 @@ object VaultActions {
         } else if (role == Role.DECOY) {
             dir = VaultManager.dirFor(master).name
         }
-        VaultManager.setSlot(slot, password, null, role, master)
+        // The settings entry is saved before the password works. The other way round, a save
+        // that failed (or a kill in between) left a working decoy password the real vault knew
+        // nothing of: it never protected that decoy and in time wrote over it.
+        val entry = DuressSlot(slot, action, label, dir, decoyKey)
+        fun undo() {
+            if (decoyKey != null && segs != null) runCatching { ContainerStorage.destroy(segs, master) }
+            Aead.wipe(master)
+        }
+        if (!s.store.updateSettings { it.copy(duress = it.duress + entry) }) {
+            undo()
+            return Added.FAILED
+        }
+        try {
+            VaultManager.setSlot(slot, password, null, role, master)
+        } catch (t: Throwable) {
+            s.store.updateSettings { it.copy(duress = it.duress - entry) }
+            undo()
+            throw t
+        }
         Aead.wipe(master)
-        s.store.updateSettings { it.copy(duress = it.duress + DuressSlot(slot, action, label, dir, decoyKey)) }
         return Added.OK
     }
 

@@ -115,16 +115,50 @@ object PlainPrefs {
 
     private fun bootCount(): Int = runCatching { Settings.Global.getInt(app.contentResolver, Settings.Global.BOOT_COUNT) }.getOrDefault(-1)
 
-    /** Notes a wrong password, with times the lock-out can trust (see [lockoutRemainingMs]). */
-    fun recordFailure() {
+    /** What [beginAttempt] changed, so [cancelAttempt] can put it back. */
+    class Attempt internal constructor(internal val before: Map<String, String?>, internal val counted: String)
+
+    private val attemptKeys = listOf("failed", "failed_at", "failed_since_boot", "failed_boot")
+
+    /**
+     * Counts a password attempt as a wrong one before the password is tried, with times the
+     * lock-out can trust (see [lockoutRemainingMs]), and only says yes once the count is on the
+     * disk. Returns null if it couldn't be saved (storage full, say): the attempt must then not
+     * be made, or a count kept only in memory could be thrown away by stopping the app, for
+     * as many guesses as anyone likes. The real password clears the count with [resetFailures].
+     */
+    fun beginAttempt(): Attempt? = synchronized(this) {
+        val before = attemptKeys.associateWith { values[it] }
+        val counted = (failedAttempts + 1).toString()
+        values["failed"] = counted
+        values["failed_at"] = System.currentTimeMillis().toString()
+        values["failed_since_boot"] = SystemClock.elapsedRealtime().toString()
+        values["failed_boot"] = bootCount().toString()
+        if (persist()) Attempt(before, counted) else {
+            before.forEach { (k, v) -> if (v == null) values.remove(k) else values[k] = v }
+            null
+        }
+    }
+
+    /**
+     * Takes one attempt back out of the count, leaving the count as it was before it: for a
+     * password that opened something other than the real vault. Wrong passwords counted before
+     * it stay counted.
+     */
+    fun cancelAttempt(a: Attempt) {
         synchronized(this) {
-            values["failed"] = (failedAttempts + 1).toString()
-            values["failed_at"] = System.currentTimeMillis().toString()
-            values["failed_since_boot"] = SystemClock.elapsedRealtime().toString()
-            values["failed_boot"] = bootCount().toString()
+            if (values["failed"] == a.counted) {
+                a.before.forEach { (k, v) -> if (v == null) values.remove(k) else values[k] = v }
+            } else {
+                // Another attempt was counted meanwhile: take off just this one.
+                values["failed"] = (failedAttempts - 1).coerceAtLeast(0).toString()
+            }
         }
         persist()
     }
+
+    /** How long to refuse attempts when the count of them can't be saved. */
+    const val UNSAVED_WAIT_MS = 30_000L
 
     /**
      * Exponential back-off after 5 wrong attempts: 30 s, 1 min, 2 min ... up to 1 h. Measured with

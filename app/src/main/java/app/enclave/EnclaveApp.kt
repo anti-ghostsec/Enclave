@@ -20,6 +20,9 @@ class EnclaveApp : Application() {
     private val handler = Handler(Looper.getMainLooper())
     private val lock = Runnable { Session.lock() }
 
+    /** When the vault is due to lock, in time since boot (which keeps counting in sleep); 0 = not set. */
+    @Volatile private var lockDue = 0L
+
     override fun onCreate() {
         super.onCreate()
         PlainPrefs.init(this)
@@ -32,12 +35,19 @@ class EnclaveApp : Application() {
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) {
                 handler.removeCallbacks(lock)
+                // The timer below doesn't run while the phone sleeps or Enclave is frozen in the
+                // background. If the time is up, lock now, before anything is shown.
+                val due = lockDue
+                lockDue = 0
+                if (due != 0L && android.os.SystemClock.elapsedRealtime() >= due) Session.lock()
                 Session.cameBack()
             }
 
             override fun onStop(owner: LifecycleOwner) {
                 handler.removeCallbacks(lock)
-                handler.postDelayed(lock, Session.lockDelayMs(PlainPrefs.autoLockSeconds * 1000L))
+                val delay = Session.lockDelayMs(app.enclave.vault.VaultActions.autoLockSeconds() * 1000L)
+                lockDue = android.os.SystemClock.elapsedRealtime() + delay
+                handler.postDelayed(lock, delay)
             }
         })
 

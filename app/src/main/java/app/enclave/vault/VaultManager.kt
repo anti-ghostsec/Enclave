@@ -67,6 +67,18 @@ object VaultManager {
         scratchDir.listFiles()?.forEach { it.deleteRecursively() }
         scratchDir.mkdirs()
         scratchDir.setLastModified(VaultStore.FIXED_TIME)
+        removeEmptyVaultDirs(vaultsRoot)
+    }
+
+    /**
+     * Versions up to 0.5.1 left an empty directory under "vaults" for every vault ever unlocked,
+     * named after its key: their number showed how many vaults there are. Empty ones are removed
+     * (a directory with anything in it can't be removed this way, so an old-format vault is
+     * never touched), and "vaults" itself when nothing is left in it.
+     */
+    internal fun removeEmptyVaultDirs(root: File) {
+        root.listFiles()?.forEach { if (it.isDirectory) it.delete() }
+        root.delete()
     }
 
     private val headerFile get() = File(app.noBackupFilesDir, "header.bin")
@@ -107,7 +119,7 @@ object VaultManager {
     /** Creates a brand new vault and returns it unlocked. */
     fun create(password: CharArray, keyfileSecret: ByteArray?): UnlockResult {
         val h = Header(Kdf.DEFAULT, Aead.random(32), Array(Header.SLOT_COUNT) { Header.randomSlot() })
-        val slot = (0 until Header.SLOT_COUNT).random()
+        val slot = slotRng.nextInt(Header.SLOT_COUNT)
         val master = Aead.random(Aead.KEY_BYTES)
         val kek = Kdf.derive(password, keyfileSecret, h.salt, h.params)
         sealSlot(h, slot, kek, Role.MAIN, master)
@@ -200,7 +212,11 @@ object VaultManager {
         write(h)
     }
 
-    fun freeSlot(used: Set<Int>): Int? = (0 until Header.SLOT_COUNT).filter { it !in used }.randomOrNull()
+    /** Which slot a password goes into must not be guessable: the cryptographic generator picks it. */
+    private val slotRng = java.security.SecureRandom()
+
+    fun freeSlot(used: Set<Int>): Int? =
+        (0 until Header.SLOT_COUNT).filter { it !in used }.let { free -> if (free.isEmpty()) null else free[slotRng.nextInt(free.size)] }
 
     /**
      * Crypto-shreds everything: the hardware key and the header are destroyed first, which makes

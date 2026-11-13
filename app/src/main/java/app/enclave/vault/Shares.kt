@@ -24,10 +24,13 @@ object Shares {
 
     private val live = ConcurrentHashMap<String, Share>()
 
+    /** Time since boot, sleep included: unlike the clock, it can't be set back to keep a link alive. */
+    private fun now() = android.os.SystemClock.elapsedRealtime()
+
     fun create(context: Context, store: VaultStore, e: Entry): Uri {
         val token = Aead.hex(Aead.random(16))
         live[token] = Share(
-            store.shareSource(e), store.keyBytes(e), e.name, e.mime, e.size, System.currentTimeMillis() + LIFETIME_MS,
+            store.shareSource(e), store.keyBytes(e), e.name, e.mime, e.size, now() + LIFETIME_MS,
             needsVault = !store.sharesOutliveLock(e),
         )
         return Uri.parse("content://${context.packageName}.files/$token/${Uri.encode(e.name)}")
@@ -36,7 +39,7 @@ object Shares {
     fun get(uri: Uri): Share? {
         val token = uri.pathSegments.firstOrNull() ?: return null
         val s = live[token] ?: return null
-        if (System.currentTimeMillis() > s.expires) {
+        if (now() > s.expires) {
             live.remove(token)?.key?.fill(0)
             return null
         }
@@ -47,7 +50,7 @@ object Shares {
 
     /** How much longer a live link needs the vault to stay open; 0 if none does. */
     fun vaultNeededForMs(): Long {
-        val now = System.currentTimeMillis()
+        val now = now()
         return live.values.filter { it.needsVault }.maxOfOrNull { it.expires - now }?.coerceIn(0, LIFETIME_MS) ?: 0
     }
 

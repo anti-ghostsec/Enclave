@@ -49,9 +49,8 @@ class DirStorage(val dir: File) : Storage {
     private val indexFile = File(dir, "index.enc")
     private val settingsFile = File(dir, "settings.enc")
 
-    init {
-        dir.mkdirs()
-    }
+    // The directory is made when something is first written, never just by looking: a directory
+    // named after a vault's key, left behind by every unlock, showed how many vaults there are.
 
     fun file(name: String) = File(dir, name)
 
@@ -63,6 +62,7 @@ class DirStorage(val dir: File) : Storage {
 
     private fun atomicWrite(f: File, write: (OutputStream) -> Unit) {
         val tmp = File(f.path + ".tmp")
+        dir.mkdirs()
         try {
             tmp.outputStream().buffered().use(write)
         } catch (t: Throwable) {

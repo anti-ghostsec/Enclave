@@ -20,6 +20,10 @@ object Session {
          * here (see [VaultActions.changePassword]). Guarded by [sessionDuress].
          */
         var sessionPassword: ByteArray? = null
+
+        /** The lock settings a decoy session was asked to set (see [VaultActions.wipeAfterFailures]). */
+        @Volatile var sessionWipeAfter = 0
+        @Volatile var sessionAutoLock = PlainPrefs.autoLockSeconds
     }
 
     /** Shown while a vault is being prepared or moved into the containers. */

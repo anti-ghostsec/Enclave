@@ -96,8 +96,8 @@ fun SettingsScreen(s: Session.Unlocked, disguiseLabel: String) {
     var codeDialog by remember { mutableStateOf(false) }
     var disguise by remember { mutableStateOf(Disguise.current()) }
     var facade by remember { mutableStateOf(PlainPrefs.calculatorFacade) }
-    var autoLock by remember { mutableIntStateOf(PlainPrefs.autoLockSeconds) }
-    var wipeAfter by remember { mutableIntStateOf(PlainPrefs.wipeAfterFailures) }
+    var autoLock by remember { mutableIntStateOf(VaultActions.autoLockSeconds()) }
+    var wipeAfter by remember { mutableIntStateOf(VaultActions.wipeAfterFailures()) }
     val strongBox = remember { HardwareKey.isStrongBox() }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
@@ -192,14 +192,14 @@ fun SettingsScreen(s: Session.Unlocked, disguiseLabel: String) {
         Text("Enclave always locks when the screen turns off. When you switch to another app:", style = MaterialTheme.typography.bodySmall)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf(0 to "Immediately", 30 to "30 s", 60 to "1 min", 300 to "5 min").forEach { (v, label) ->
-                FilterChip(selected = autoLock == v, onClick = { PlainPrefs.autoLockSeconds = v; autoLock = v }, label = { Text(label) })
+                FilterChip(selected = autoLock == v, onClick = { VaultActions.setAutoLockSeconds(v); autoLock = v }, label = { Text(label) })
             }
         }
 
         SectionTitle("Wipe after wrong passwords")
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf(0 to "Never", 5 to "5", 10 to "10", 20 to "20").forEach { (v, label) ->
-                FilterChip(selected = wipeAfter == v, onClick = { PlainPrefs.wipeAfterFailures = v; wipeAfter = v }, label = { Text(label) })
+                FilterChip(selected = wipeAfter == v, onClick = { VaultActions.setWipeAfterFailures(v); wipeAfter = v }, label = { Text(label) })
             }
         }
 
@@ -313,6 +313,7 @@ private fun AddDuressDialog(onDone: () -> Unit) {
                         VaultActions.Added.OK -> { ctx.toast("Duress password added"); onDone() }
                         VaultActions.Added.IN_USE -> error = "That password is already in use"
                         VaultActions.Added.NO_SLOTS -> error = "No free slots left (maximum 3 duress passwords)"
+                        VaultActions.Added.FAILED -> error = "Couldn't save it. Nothing was changed."
                     }
                 }
             }) { Text("Add") }

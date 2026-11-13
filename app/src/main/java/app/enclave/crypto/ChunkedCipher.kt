@@ -147,6 +147,12 @@ object ChunkedCipher {
             size = if (version == VERSION_PADDED) {
                 require(realSize in 0..stored) { "size doesn't fit the file" }
                 realSize
+            } else if (realSize in 1 until stored) {
+                // The version byte isn't covered by the encryption. Changing a padded file's to
+                // "unpadded" would make its zero padding appear as part of the file, so the size
+                // the (encrypted) index gives is used whenever it's shorter than what's stored.
+                // A real unpadded file's two sizes are equal, and it reads exactly as before.
+                realSize
             } else stored
         }
 
