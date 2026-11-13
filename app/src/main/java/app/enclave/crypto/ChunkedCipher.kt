@@ -179,6 +179,22 @@ object ChunkedCipher {
             return done
         }
 
+        /**
+         * Decrypts every chunk from first to last, the padding too, and feeds the real contents
+         * to [digest]. Throws if any chunk doesn't open or the length isn't what the index says:
+         * a file that passes is whole.
+         */
+        @Synchronized
+        fun checkAll(digest: java.security.MessageDigest? = null) {
+            var pos = 0L
+            for (i in 0 until chunks) {
+                val c = chunk(i)
+                val n = minOf(c.size.toLong(), size - pos).toInt()
+                if (n > 0) { digest?.update(c, 0, n); pos += n }
+            }
+            if (pos != size) throw java.io.IOException("file is shorter than it should be")
+        }
+
         fun inputStream(): InputStream = object : InputStream() {
             private var pos = 0L
             override fun read(): Int {

@@ -157,6 +157,7 @@ fun FilesScreen(
     val selecting = selected.isNotEmpty()
 
     var importing by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    var checking by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var deleteOriginals by remember { mutableStateOf<List<File>>(emptyList()) }
     var browseImport by remember { mutableStateOf(false) }
     var newFolder by remember { mutableStateOf(false) }
@@ -181,16 +182,31 @@ fun FilesScreen(
         scope.launch {
             val doneFiles = mutableListOf<File>()
             var done = 0
+            val added = mutableListOf<Pair<Any, Entry>>()
             sources.forEachIndexed { i, src ->
                 importing = i to sources.size
                 withContext(Dispatchers.IO) {
                     runCatching {
                         if (src is File) store.importFile(src, folder?.id) else store.import(ctx.contentResolver, src as Uri, folder?.id)
                     }
-                }.onSuccess { done++; if (src is File) doneFiles += src }
+                }.onSuccess { added += src to it }
                     .onFailure { ctx.toast("Couldn't import a file: ${it.message}") }
             }
+            // Each file was checked as it was stored. Now that all of them are saved, every one
+            // is read back once more: only a file that is whole in the vault counts as done, and
+            // only its original is offered for deletion.
+            val broken = mutableListOf<Entry>()
+            added.forEachIndexed { i, (src, e) ->
+                checking = i to added.size
+                val ok = withContext(Dispatchers.IO) { store.verify(e) }
+                if (ok) { done++; if (src is File) doneFiles += src } else broken += e
+            }
+            checking = null
             importing = null
+            if (broken.isNotEmpty() && store.isOpen) {
+                withContext(Dispatchers.IO) { runCatching { store.delete(broken.map { it.id }) } }
+                ctx.toast("${broken.size} file(s) didn't store correctly and were taken out of the vault. The originals are untouched: add them again.")
+            }
             if (doneFiles.isNotEmpty()) deleteOriginals = doneFiles
             else if (done > 0) ctx.toast("$done encrypted. Delete the originals from your Gallery app.")
         }
@@ -307,7 +323,11 @@ fun FilesScreen(
                 LinearProgressIndicator(progress = { if (n > 0) i.toFloat() / n else 0f }, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp))
             }
             importing?.let { (i, n) ->
-                Text("Encrypting ${i + 1} of $n…", Modifier.padding(horizontal = 16.dp))
+                val check = checking
+                Text(
+                    if (check != null) "Checking ${check.first + 1} of ${check.second}…" else "Encrypting ${i + 1} of $n…",
+                    Modifier.padding(horizontal = 16.dp),
+                )
                 LinearProgressIndicator(Modifier.fillMaxWidth().padding(16.dp))
             }
             if (children.isEmpty() && importing == null) {

@@ -100,6 +100,11 @@ class VaultStore(val storage: Storage, master: ByteArray) {
     /** The last thing that couldn't be saved, for the UI to show once. */
     val problem = MutableStateFlow<String?>(null)
 
+    val isOpen get() = !closed
+
+    /** SHA-256 of what each file imported in this session held when it was read, by id. */
+    private val importedHashes = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
+
     init {
         storage.loadIndex()?.let { _entries.value = json.decodeFromString<Index>(String(Aead.open(indexKey, it))).entries }
         storage.loadSettings()?.let { _settings.value = json.decodeFromString(String(Aead.open(settingsKey, it))) }
@@ -169,7 +174,8 @@ class VaultStore(val storage: Storage, master: ByteArray) {
         return importStream(name, cr.getType(uri) ?: mimeOf(name), parent) { cr.openInputStream(uri)!! }
     }
 
-    fun importFile(f: File, parent: String?): Entry = importStream(f.name, mimeOf(f.name), parent) { f.inputStream() }
+    fun importFile(f: File, parent: String?): Entry =
+        importStream(f.name, mimeOf(f.name), parent, expectedSize = f.length()) { f.inputStream() }
 
     private fun mimeOf(name: String) =
         MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase()) ?: "application/octet-stream"
@@ -181,19 +187,61 @@ class VaultStore(val storage: Storage, master: ByteArray) {
         return size
     }
 
-    private fun importStream(name: String, mime: String, parent: String?, open: () -> InputStream): Entry {
+    /**
+     * Encrypts one file into the vault. Before it's listed, what was stored is read back and
+     * decrypted from start to end and compared (by SHA-256) with what was read from the source,
+     * so a file that didn't store whole is never shown as imported: it's removed and this throws.
+     * [expectedSize] is the source's length when it's known for sure; a source that ends before
+     * that is refused too.
+     */
+    private fun importStream(name: String, mime: String, parent: String?, expectedSize: Long = -1, open: () -> InputStream): Entry {
         check(!closed) { "vault is locked" }
         val id = newId()
         val key = Aead.random(Aead.KEY_BYTES)
-        val size = writeBlob(id, key, open)
-        writeThumb(id, key, null, THUMB_PENDING)
-        val e = Entry(id, parent, name, false, size, mime, System.currentTimeMillis(), Base64.encodeToString(key, Base64.NO_WRAP))
-        key.fill(0)
-        if (!updateEntries { it + e }) {
-            runCatching { storage.delete(id); storage.delete(thumbName(id)) }
-            error(problem.value ?: "vault is locked")
+        try {
+            val read = MessageDigest.getInstance("SHA-256")
+            val size = writeBlob(id, key) { DigestInputStream(open(), read) }
+            val sourceHash = read.digest()
+            if (size < expectedSize) throw java.io.IOException("the file ended early ($size of $expectedSize bytes); nothing was added")
+            val stored = runCatching { storedHash(id, key, size) }.getOrNull()
+            if (stored == null || !MessageDigest.isEqual(stored, sourceHash)) throw java.io.IOException(NOT_STORED)
+            writeThumb(id, key, null, THUMB_PENDING)
+            val e = Entry(id, parent, name, false, size, mime, System.currentTimeMillis(), Base64.encodeToString(key, Base64.NO_WRAP))
+            if (!updateEntries { it + e }) error(problem.value ?: "vault is locked")
+            importedHashes[id] = sourceHash
+            return e
+        } catch (t: Throwable) {
+            runCatching { storage.delete(id) }
+            runCatching { storage.delete(thumbName(id)) }
+            throw t
+        } finally {
+            key.fill(0)
         }
-        return e
+    }
+
+    /** Decrypts the whole stored file, every chunk of it, and returns the SHA-256 of its contents. */
+    private fun storedHash(id: String, key: ByteArray, size: Long): ByteArray {
+        val md = MessageDigest.getInstance("SHA-256")
+        ChunkedCipher.Reader(storage.open(id), key, size).use { it.checkAll(md) }
+        return md.digest()
+    }
+
+    /**
+     * Whether a file is whole: every chunk decrypts and the length is right, and, for a file
+     * imported in this session, the contents are still what was read from its source. Reads the
+     * entire file. The UI runs this once everything in an import has been saved, before it says
+     * the originals can go.
+     */
+    fun verify(e: Entry): Boolean {
+        if (e.folder) return true
+        val key = runCatching { keyOf(e) }.getOrNull() ?: return false
+        try {
+            val stored = runCatching { storedHash(e.id, key, e.size) }.getOrNull() ?: return false
+            val expected = importedHashes[e.id] ?: return true
+            return MessageDigest.isEqual(stored, expected)
+        } finally {
+            key.fill(0)
+        }
     }
 
     fun reader(e: Entry) = ChunkedCipher.Reader(storage.open(e.id), keyOf(e), e.size)
@@ -496,6 +544,8 @@ class VaultStore(val storage: Storage, master: ByteArray) {
         runCatching { storage.close() }
         closed = true
         indexKey.fill(0); settingsKey.fill(0)
+        importedHashes.values.forEach { it.fill(0) }
+        importedHashes.clear()
         thumbs.evictAll()
         _entries.value = emptyList()
     }
@@ -509,5 +559,6 @@ class VaultStore(val storage: Storage, master: ByteArray) {
         private const val SHARE_IN_MEMORY = 64L * 1024 * 1024
         private const val THUMB_PENDING = 0
         private const val THUMB_NONE = -1
+        const val NOT_STORED = "the file didn't store correctly and wasn't added; the original is untouched, try again"
     }
 }

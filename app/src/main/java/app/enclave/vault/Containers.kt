@@ -391,14 +391,34 @@ class ContainerStorage private constructor(
 
     override fun saveIndex(sealed: ByteArray) {
         if (readOnly) throw StorageFullException()
-        synchronized(this) { index = sealed.copyOf(); dirty = true }
-        commit()
+        synchronized(this) {
+            val before = index
+            index = sealed.copyOf(); dirty = true
+            try {
+                commit()
+            } catch (t: Throwable) {
+                // Not saved, and the caller carries on with the index it had. A later save (of
+                // the settings, or at the lock) must not slip this one in: it may name files
+                // the caller has since taken back out.
+                index = before
+                throw t
+            }
+        }
     }
 
     override fun saveSettings(sealed: ByteArray) {
-        synchronized(this) { settings = sealed.copyOf(); dirty = true }
-        // A read-only decoy keeps settings for this session only.
-        if (!readOnly) commit()
+        synchronized(this) {
+            val before = settings
+            settings = sealed.copyOf(); dirty = true
+            // A read-only decoy keeps settings for this session only.
+            if (readOnly) return
+            try {
+                commit()
+            } catch (t: Throwable) {
+                settings = before
+                throw t
+            }
+        }
     }
 
     override fun names(): Set<String> = synchronized(this) { files.keys.toSet() }
@@ -438,7 +458,15 @@ class ContainerStorage private constructor(
         if (readOnly || !dirty || closed) return
         // 1. Everything the new root will point to goes to the disk first.
         for (s in vol.keys) if (s != home && (unflushed[s] ?: 0) > 0) {
-            Native.flush(handle(s)); unflushed[s] = 0
+            // Cleared before the flush, not after: a write by another thread that lands while
+            // this runs is then still counted, and flushed by the next save.
+            val n = unflushed.put(s, 0L) ?: 0L
+            try {
+                Native.flush(handle(s))
+            } catch (t: Throwable) {
+                unflushed.merge(s, n, Long::plus)
+                throw t
+            }
         }
         // 2. The new root, into space no saved root uses, in the home volume. Its place is chosen
         // before the root is written out, because the root lists the free space: the place it
