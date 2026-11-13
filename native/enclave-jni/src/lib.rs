@@ -14,6 +14,7 @@ use deniable::{BlockDevice, Error, FileDevice, Kdf, Store, VolumeId};
 use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jint, jlong};
 use jni::JNIEnv;
+use zeroize::{Zeroize, Zeroizing};
 
 struct Inner {
     /// None once closed: the keys and the file are gone, and every call fails cleanly.
@@ -87,11 +88,21 @@ fn into_handle(store: Store<FileDevice>, blocks: u64) -> jlong {
     Box::into_raw(Box::new(Container { inner: Mutex::new(Inner { store: Some(store), ids: Vec::new() }), blocks })) as jlong
 }
 
-fn key(env: &mut JNIEnv, array: &JByteArray) -> Result<[u8; 32], String> {
+/// The key in a Java array. Both copies made here are wiped: the bytes read from Java at once,
+/// and the returned key when the caller is done with it.
+fn key(env: &mut JNIEnv, array: &JByteArray) -> Result<Zeroizing<[u8; 32]>, String> {
     let mut bytes = env.convert_byte_array(array).map_err(|e| e.to_string())?;
-    let out: Result<[u8; 32], _> = bytes.as_slice().try_into();
-    bytes.iter_mut().for_each(|b| *b = 0);
-    out.map_err(|_| "key must be 32 bytes".to_string())
+    let mut out = Zeroizing::new([0u8; 32]);
+    let fits = bytes.len() == out.len();
+    if fits {
+        out.copy_from_slice(&bytes);
+    }
+    bytes.zeroize();
+    if fits {
+        Ok(out)
+    } else {
+        Err("key must be 32 bytes".to_string())
+    }
 }
 
 fn path(env: &mut JNIEnv, p: &JString) -> Result<String, String> {

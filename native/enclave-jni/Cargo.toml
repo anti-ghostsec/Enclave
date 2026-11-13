@@ -13,3 +13,4 @@ crate-type = ["cdylib"]
 [dependencies]
 deniable = { path = "../deniable" }
 jni = "0.21"
+zeroize = "1"

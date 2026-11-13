@@ -91,7 +91,7 @@ val cargoAndroid by tasks.registering(Exec::class) {
     inputs.dir(nativeDir.resolve("enclave-jni/src"))
     inputs.files(nativeDir.resolve("Cargo.toml"), nativeDir.resolve("Cargo.lock"))
     outputs.file(nativeDir.resolve("target/aarch64-linux-android/release/libenclave_jni.so"))
-    commandLine("cargo", "build", "--release", "-p", "enclave-jni", "--target", "aarch64-linux-android")
+    commandLine("cargo", "build", "--release", "--locked", "-p", "enclave-jni", "--target", "aarch64-linux-android")
     doFirst {
         val ndk = androidComponents.sdkComponents.sdkDirectory.get().asFile.resolve("ndk/${android.ndkVersion}")
         val clang = ndk.resolve("toolchains/llvm/prebuilt/$ndkHost/bin/aarch64-linux-android29-clang" + if (isWindows) ".cmd" else "")
@@ -120,7 +120,7 @@ val cargoHost by tasks.registering(Exec::class) {
     inputs.dir(nativeDir.resolve("deniable/src"))
     inputs.dir(nativeDir.resolve("enclave-jni/src"))
     outputs.file(hostLib)
-    commandLine("cargo", "build", "--release", "-p", "enclave-jni")
+    commandLine("cargo", "build", "--release", "--locked", "-p", "enclave-jni")
 }
 tasks.withType<Test>().configureEach {
     dependsOn(cargoHost)
