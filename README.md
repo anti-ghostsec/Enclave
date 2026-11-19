@@ -60,7 +60,7 @@ Versions up to 0.5.1 could damage a file while adding another one after the vaul
 Earlier versions also left an empty directory behind for every vault that had been unlocked. They are removed when Enclave starts; a directory that holds an old-format vault is never touched.
 
 ## Build
-Needs the Android NDK (r29) and Rust with the `aarch64-linux-android` target. Gradle builds the Rust code itself.
+Needs the Android NDK (r29) and Rust with the `aarch64-linux-android` and `x86_64-linux-android` targets. Gradle builds the Rust code itself.
 ```
 ./gradlew assembleDebug                       # app/build/outputs/apk/debug/app-debug.apk
 ./gradlew testDebugUnitTest                   # file-format and upgrade tests, run on the PC

@@ -16,7 +16,8 @@ android {
         versionCode = 9
         versionName = "0.5.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        ndk { abiFilters += "arm64-v8a" }
+        // Phones, and x86_64 for emulators and PCs running Android, which can't run ARM code.
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
     sourceSets.getByName("main").jniLibs.directories.add(layout.buildDirectory.dir("jniLibs").get().asFile.path)
@@ -84,25 +85,32 @@ val ndkHost = when {
     else -> "linux-x86_64"
 }
 
+// Each Android ABI the app ships for, with the Rust target that builds it.
+val androidTargets = mapOf("arm64-v8a" to "aarch64-linux-android", "x86_64" to "x86_64-linux-android")
+
 val cargoAndroid by tasks.registering(Exec::class) {
-    description = "Builds the native library for phones (arm64)."
+    description = "Builds the native library for Android (arm64 and x86_64)."
     workingDir = nativeDir
     inputs.dir(nativeDir.resolve("deniable/src"))
     inputs.dir(nativeDir.resolve("enclave-jni/src"))
     inputs.files(nativeDir.resolve("Cargo.toml"), nativeDir.resolve("Cargo.lock"))
-    outputs.file(nativeDir.resolve("target/aarch64-linux-android/release/libenclave_jni.so"))
-    commandLine("cargo", "build", "--release", "--locked", "-p", "enclave-jni", "--target", "aarch64-linux-android")
+    androidTargets.values.forEach { outputs.file(nativeDir.resolve("target/$it/release/libenclave_jni.so")) }
+    commandLine(listOf("cargo", "build", "--release", "--locked", "-p", "enclave-jni") + androidTargets.values.flatMap { listOf("--target", it) })
     doFirst {
         val ndk = androidComponents.sdkComponents.sdkDirectory.get().asFile.resolve("ndk/${android.ndkVersion}")
-        val clang = ndk.resolve("toolchains/llvm/prebuilt/$ndkHost/bin/aarch64-linux-android29-clang" + if (isWindows) ".cmd" else "")
-        environment("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", clang.path)
+        androidTargets.values.forEach { target ->
+            val clang = ndk.resolve("toolchains/llvm/prebuilt/$ndkHost/bin/${target}29-clang" + if (isWindows) ".cmd" else "")
+            environment("CARGO_TARGET_" + target.uppercase().replace('-', '_') + "_LINKER", clang.path)
+        }
     }
 }
 
 val copyJniLibs by tasks.registering(Copy::class) {
     dependsOn(cargoAndroid)
-    from(nativeDir.resolve("target/aarch64-linux-android/release/libenclave_jni.so"))
-    into(layout.buildDirectory.dir("jniLibs/arm64-v8a"))
+    androidTargets.forEach { (abi, target) ->
+        from(nativeDir.resolve("target/$target/release/libenclave_jni.so")) { into(abi) }
+    }
+    into(layout.buildDirectory.dir("jniLibs"))
 }
 tasks.named("preBuild") { dependsOn(copyJniLibs) }
 
