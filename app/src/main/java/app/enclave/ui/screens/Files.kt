@@ -105,12 +105,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import app.enclave.ui.BrowseMode
 import app.enclave.ui.Opener
-import app.enclave.ui.StorageBrowser
-import app.enclave.ui.freeName
+import app.enclave.ui.TreeExportFolder
+import app.enclave.ui.canDelete
+import app.enclave.ui.deleteDocument
 import androidx.compose.material.icons.filled.Share
-import java.io.File
+import androidx.documentfile.provider.DocumentFile
 import app.enclave.ui.PrivateKeyboard
 import app.enclave.ui.leavingOnPurpose
 import app.enclave.ui.openExternally
@@ -158,8 +158,7 @@ fun FilesScreen(
 
     var importing by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var checking by remember { mutableStateOf<Pair<Int, Int>?>(null) }
-    var deleteOriginals by remember { mutableStateOf<List<Pair<File, Entry>>>(emptyList()) }
-    var browseImport by remember { mutableStateOf(false) }
+    var deleteOriginals by remember { mutableStateOf<List<Pair<Uri, Entry>>>(emptyList()) }
     var newFolder by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<Entry?>(null) }
     var deleting by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -177,30 +176,56 @@ fun FilesScreen(
     }
     LaunchedEffect(all) { selected.retainAll(all.map { it.id }.toSet()) }
 
-    fun importAll(sources: List<Any>) {
+    /**
+     * [documents] is true for files picked with Android's file picker, whose originals Enclave
+     * may be allowed to delete afterwards. The photo picker's never can be.
+     */
+    fun importAll(sources: List<Uri>, documents: Boolean) {
         if (sources.isEmpty()) return
         scope.launch {
-            val doneFiles = mutableListOf<Pair<File, Entry>>()
+            val deletable = mutableListOf<Pair<Uri, Entry>>()
             var done = 0
             sources.forEachIndexed { i, src ->
                 importing = i to sources.size
                 withContext(Dispatchers.IO) {
                     runCatching {
-                        if (src is File) store.importFile(src, folder?.id) else store.import(ctx.contentResolver, src as Uri, folder?.id)
+                        // A file whose original may be deleted must be as long as its app says.
+                        val e = store.import(ctx.contentResolver, src, folder?.id, checkSize = documents)
+                        e to (documents && canDelete(ctx.contentResolver, src))
                     }
-                }.onSuccess { done++; if (src is File) doneFiles += src to it }
+                }.onSuccess { (e, canGo) -> done++; if (canGo) deletable += src to e }
                     // Only Enclave's own wording: a system error can hold the file's path, and a
                     // toast isn't covered by the screenshot block.
                     .onFailure { ctx.toast("Couldn't import a file" + VaultStore.reasonToShow(it)) }
             }
             importing = null
+            val stay = done - deletable.size
             // Each file was read back and compared with its original before it was listed.
-            if (doneFiles.isNotEmpty()) deleteOriginals = doneFiles
-            else if (done > 0) ctx.toast("$done encrypted. Delete the originals from your Gallery app.")
+            if (deletable.isNotEmpty()) deleteOriginals = deletable
+            if (stay > 0) ctx.toast(
+                if (documents) "$stay encrypted whose originals Enclave isn't allowed to delete. Delete those in the app they came from."
+                else "$done encrypted. Delete the originals from your Gallery app.",
+            )
         }
     }
 
-    val mediaImporter = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(100)) { importAll(it) }
+    val mediaImporter = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(100)) { importAll(it, documents = false) }
+    val fileImporter = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { importAll(it, documents = true) }
+    val exportPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
+        val ids = exporting
+        exporting = emptyList()
+        if (tree == null || ids.isEmpty()) return@rememberLauncherForActivityResult
+        scope.launch {
+            val n = withContext(Dispatchers.IO) {
+                runCatching {
+                    val dir = DocumentFile.fromTreeUri(ctx, tree) ?: error("no folder")
+                    store.exportTo(ids, TreeExportFolder(ctx.contentResolver, dir))
+                }.getOrDefault(-1)
+            }
+            if (n < 0) ctx.toast("Export failed") else ctx.toast("Exported $n decrypted file(s)")
+            selected.clear()
+        }
+    }
 
     fun toggle(e: Entry) {
         if (e.id in selected) selected.remove(e.id) else selected.add(e.id)
@@ -226,6 +251,8 @@ fun FilesScreen(
 
     fun startExport(ids: List<String>) {
         exporting = ids
+        leavingOnPurpose()
+        exportPicker.launch(null)
     }
 
     fun share(ids: Collection<String>) = Opener.share(ctx, store, all.filter { it.id in ids })
@@ -427,7 +454,7 @@ fun FilesScreen(
                 )
                 DropdownMenuItem(
                     text = { Text("Files from storage") }, leadingIcon = { Icon(Icons.Default.UploadFile, null) },
-                    onClick = { addMenu = false; browseImport = true },
+                    onClick = { addMenu = false; leavingOnPurpose(); fileImporter.launch(arrayOf("*/*")) },
                 )
                 DropdownMenuItem(
                     text = { Text("New folder") }, leadingIcon = { Icon(Icons.Default.CreateNewFolder, null) },
@@ -463,23 +490,6 @@ fun FilesScreen(
             dismissButton = { TextButton(onClick = { deleting = emptyList() }) { Text("Cancel") } },
         )
     }
-    if (browseImport) {
-        StorageBrowser(BrowseMode.FILES, onDismiss = { browseImport = false }, confirmLabel = "Encrypt into vault") { files ->
-            browseImport = false
-            importAll(files)
-        }
-    }
-    if (exporting.isNotEmpty()) {
-        StorageBrowser(BrowseMode.FOLDER, onDismiss = { exporting = emptyList() }, confirmLabel = "Export here") { dirs ->
-            val ids = exporting
-            exporting = emptyList()
-            scope.launch {
-                val n = withContext(Dispatchers.IO) { runCatching { store.exportTo(ids, dirs[0], ::freeName) }.getOrDefault(-1) }
-                if (n < 0) ctx.toast("Export failed") else ctx.toast("Exported $n decrypted file(s)")
-                selected.clear()
-            }
-        }
-    }
     if (deleteOriginals.isNotEmpty()) {
         AlertDialog(
             onDismissRequest = { deleteOriginals = emptyList() },
@@ -503,7 +513,7 @@ fun FilesScreen(
                             checking = i to batch.size
                             val whole = withContext(Dispatchers.IO) { store.verify(e) }
                             if (!whole) kept++
-                            else if (!withContext(Dispatchers.IO) { original.delete() }) failed++
+                            else if (!withContext(Dispatchers.IO) { deleteDocument(ctx.contentResolver, original) }) failed++
                         }
                         checking = null
                         if (kept > 0) ctx.toast("$kept file(s) couldn't be read back from the vault, so their originals were kept. Add them again.")

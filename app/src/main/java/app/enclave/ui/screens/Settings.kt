@@ -91,6 +91,14 @@ fun SettingsScreen(s: Session.Unlocked, disguiseLabel: String) {
     var changePw by remember { mutableStateOf(false) }
     var fillingDecoy by remember { mutableStateOf<app.enclave.vault.DuressSlot?>(null) }
     val scope = rememberCoroutineScope()
+    val decoyFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        val d = fillingDecoy
+        fillingDecoy = null
+        if (d != null && uris.isNotEmpty()) scope.launch {
+            val added = withContext(Dispatchers.IO) { VaultActions.fillDecoy(d, ctx.contentResolver, uris) }
+            ctx.toast(if (added < 0) "Couldn't open the decoy" else "Added $added file(s) to the decoy")
+        }
+    }
     var addDuress by remember { mutableStateOf(false) }
     var wipeAll by remember { mutableStateOf(false) }
     var codeDialog by remember { mutableStateOf(false) }
@@ -142,7 +150,7 @@ fun SettingsScreen(s: Session.Unlocked, disguiseLabel: String) {
                 trailingContent = { IconButton(onClick = { VaultActions.removeDuress(d) }) { Icon(Icons.Default.Delete, "Remove") } },
             )
             if (VaultActions.canFill(d)) {
-                TextButton(onClick = { fillingDecoy = d }) { Text("Add harmless files to this decoy") }
+                TextButton(onClick = { fillingDecoy = d; leavingOnPurpose(); decoyFiles.launch(arrayOf("*/*")) }) { Text("Add harmless files to this decoy") }
             }
         }
         OutlinedButton(onClick = { addDuress = true }) { Text("Add duress password") }
@@ -208,15 +216,6 @@ fun SettingsScreen(s: Session.Unlocked, disguiseLabel: String) {
         Box(Modifier.size(32.dp))
     }
 
-    fillingDecoy?.let { d ->
-        app.enclave.ui.StorageBrowser(app.enclave.ui.BrowseMode.FILES, onDismiss = { fillingDecoy = null }, confirmLabel = "Add to decoy") { files ->
-            fillingDecoy = null
-            scope.launch {
-                val added = withContext(Dispatchers.IO) { VaultActions.fillDecoy(d, files) }
-                ctx.toast(if (added < 0) "Couldn't open the decoy" else "Added $added file(s) to the decoy")
-            }
-        }
-    }
     if (changePw) ChangePasswordDialog(onDone = { changePw = false })
     if (addDuress) AddDuressDialog(onDone = { addDuress = false })
     if (codeDialog) CalculatorCodeDialog(

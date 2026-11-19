@@ -183,13 +183,22 @@ class VaultStore(
         updateEntries { it + Entry(newId(), parent, name, folder = true, added = System.currentTimeMillis()) }
     }
 
-    /** Encrypts a file picked by the user into the vault. Plaintext never touches our storage. */
-    fun import(cr: ContentResolver, uri: Uri, parent: String?): Entry {
+    /**
+     * Encrypts a file picked by the user into the vault. Plaintext never touches our storage.
+     * With [checkSize], a file that ends before the size its app reports is refused, as when
+     * importing from disk: use it when the original may be deleted afterwards.
+     */
+    fun import(cr: ContentResolver, uri: Uri, parent: String?, checkSize: Boolean = false): Entry {
         var name = "file"
-        cr.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
-            if (it.moveToFirst() && !it.isNull(0)) name = it.getString(0)
+        var size = -1L
+        cr.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use {
+            if (it.moveToFirst()) {
+                if (!it.isNull(0)) name = it.getString(0)
+                if (!it.isNull(1)) size = it.getLong(1)
+            }
         }
-        return importStream(name, cr.getType(uri) ?: mimeOf(name), parent) { cr.openInputStream(uri)!! }
+        val expected = if (checkSize) size else -1L
+        return importStream(name, cr.getType(uri) ?: mimeOf(name), parent, expectedSize = expected) { cr.openInputStream(uri)!! }
     }
 
     fun importFile(f: File, parent: String?): Entry =
@@ -458,20 +467,14 @@ class VaultStore(
     }
 
     /** Writes decrypted copies of [ids] (folders recursively) into [target]. Returns the file count. */
-    fun exportTo(ids: Collection<String>, target: File, freeName: (File, String) -> File): Int {
+    fun exportTo(ids: Collection<String>, target: ExportFolder): Int {
         var count = 0
-        val root = target.canonicalFile
-        fun inside(f: File) = f.canonicalFile.toPath().startsWith(root.toPath())
-        fun write(e: Entry, into: File) {
+        fun write(e: Entry, into: ExportFolder) {
             if (e.folder) {
-                val d = freeName(into, e.name)
-                check(inside(d)) { "refused to write outside the chosen folder" }
-                d.mkdirs()
+                val d = into.folder(e.name)
                 _entries.value.filter { it.parent == e.id }.forEach { write(it, d) }
             } else {
-                val f = freeName(into, e.name)
-                check(inside(f)) { "refused to write outside the chosen folder" }
-                f.outputStream().use { export(e, it) }
+                into.file(e.name).use { export(e, it) }
                 count++
             }
         }
@@ -591,4 +594,13 @@ class VaultStore(
 
         const val NOT_STORED = "the file didn't store correctly and wasn't added; the original is untouched, try again"
     }
+}
+
+/** Somewhere exported files go: a folder on disk, or one picked with Android's file picker. */
+interface ExportFolder {
+    /** Makes a new folder in this one, named [name] or, if that's taken, something close to it. */
+    fun folder(name: String): ExportFolder
+
+    /** Makes a new file in this one, named like [folder]'s, and opens it for writing. */
+    fun file(name: String): OutputStream
 }

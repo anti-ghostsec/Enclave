@@ -122,12 +122,12 @@ class KeyfileState {
 fun KeyfileRow(state: KeyfileState, allowCreate: Boolean) {
     val ctx = LocalContext.current
     var menu by remember { mutableStateOf(false) }
-    var browsing by remember { mutableStateOf(false) }
 
     val onPicked: (Uri?) -> Unit = { uri ->
         if (uri != null && !state.load({ ctx.contentResolver.openInputStream(uri)!! }, "Keyfile selected")) ctx.toast("Couldn't read that file")
     }
     val pickPhoto = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia(), onPicked)
+    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument(), onPicked)
     val create = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
         if (uri != null) runCatching {
             val bytes = Aead.random(64)
@@ -147,8 +147,8 @@ fun KeyfileRow(state: KeyfileState, allowCreate: Boolean) {
                 )
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(
-                        text = { Text("Browse folders") },
-                        onClick = { menu = false; browsing = true },
+                        text = { Text("Files") },
+                        onClick = { menu = false; leavingOnPurpose(); pickFile.launch(arrayOf("*/*")) },
                     )
                     DropdownMenuItem(
                         text = { Text("Photos") },
@@ -165,12 +165,6 @@ fun KeyfileRow(state: KeyfileState, allowCreate: Boolean) {
                 // A name that says nothing about which app the file is for.
                 TextButton(onClick = { leavingOnPurpose(); create.launch("data.bin") }) { Text("Create new") }
             }
-        }
-    }
-    if (browsing) {
-        StorageBrowser(BrowseMode.FILE, onDismiss = { browsing = false }) { files ->
-            browsing = false
-            if (!state.load({ files[0].inputStream() }, "Keyfile selected")) ctx.toast("Couldn't read that file")
         }
     }
 }

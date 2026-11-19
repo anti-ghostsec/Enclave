@@ -1,5 +1,8 @@
 package app.enclave.vault
 
+import android.content.ContentResolver
+import android.net.Uri
+import android.provider.DocumentsContract
 import app.enclave.crypto.Aead
 import app.enclave.crypto.ChunkedCipher
 import app.enclave.crypto.Kdf
@@ -174,10 +177,48 @@ object Backup {
         write(store, null, password, target, progress)
 
     /**
+     * Writes a backup of [store] into [target], a file just made with Android's file picker. If
+     * it fails, the file is deleted again, so no half backup is left where the user put it.
+     */
+    fun create(store: VaultStore, password: CharArray, cr: ContentResolver, target: Uri, progress: (Long, Long) -> Unit) {
+        try {
+            val out = cr.openOutputStream(target, "w") ?: throw IOException("couldn't open the backup file")
+            val total = out.use {
+                val total = writeSealed(store, null, password, it, progress)
+                // A file on the phone itself comes as a file descriptor, which can be synced.
+                runCatching { (it as? FileOutputStream)?.fd?.sync() }
+                total
+            }
+            progress(total, total)
+        } catch (t: Throwable) {
+            runCatching { DocumentsContract.deleteDocument(cr, target) }
+            throw t
+        }
+    }
+
+    /**
      * With [oldFormatMaster], writes the file the way 0.4.0 did, master key and settings included.
      * Only the tests use that, to check such backups still restore.
      */
     internal fun write(store: VaultStore, oldFormatMaster: ByteArray?, password: CharArray, target: File, progress: (Long, Long) -> Unit) {
+        val tmp = File(target.path + ".tmp")
+        try {
+            val total = FileOutputStream(tmp).use { fos ->
+                writeSealed(store, oldFormatMaster, password, fos, progress).also { fos.fd.sync() }
+            }
+            if (!tmp.renameTo(target)) throw IOException("couldn't name the backup file")
+            progress(total, total)
+        } catch (t: Throwable) {
+            tmp.delete()
+            throw t
+        }
+    }
+
+    /**
+     * Writes the whole sealed backup to [out], from start to end in one pass, and returns its
+     * padded size. Doesn't close [out].
+     */
+    private fun writeSealed(store: VaultStore, oldFormatMaster: ByteArray?, password: CharArray, out: OutputStream, progress: (Long, Long) -> Unit): Long {
         val storage = store.storage
         storage.commit()
         val entries = store.entries.value
@@ -202,52 +243,42 @@ object Backup {
 
         val salt = Aead.random(SALT)
         val key = Kdf.derive(password, null, salt, KDF)
-        val tmp = File(target.path + ".tmp")
-        try {
-            FileOutputStream(tmp).use { fos ->
-                val sealed = SealingStream(fos.buffered(1 shl 20), key)
-                sealed.start(salt)
-                var written = 0L
-                fun put(b: ByteArray, off: Int = 0, len: Int = b.size) {
-                    sealed.write(b, off, len); written += len
-                }
-                put(ByteBuffer.allocate(8).putLong(content).array())
-                put(ByteBuffer.allocate(4).putInt(manifest.size).array())
-                put(manifest)
-                manifest.fill(0)
-                put(index)
-                index.fill(0)
-                settings?.let { put(it) }
-                val buf = ByteArray(256 * 1024)
-                try {
-                    for (name in names) {
-                        val size = storage.size(name)
-                        storage.open(name).use { src ->
-                            var p = 0L
-                            while (p < size) {
-                                val n = src.read(p, buf, 0, minOf(buf.size.toLong(), size - p).toInt())
-                                if (n <= 0) throw IOException("$name ended early")
-                                put(buf, 0, n)
-                                p += n
-                            }
-                        }
-                        progress(written, total)
-                    }
-                } finally {
-                    buf.fill(0)
-                }
-                // Zeros up to the padded size, so the file's size says little about the vault's.
-                val zeros = ByteArray(64 * 1024)
-                while (written < total) put(zeros, 0, minOf(zeros.size.toLong(), total - written).toInt())
-                sealed.close()
-                fos.fd.sync()
-            }
-            if (!tmp.renameTo(target)) throw IOException("couldn't name the backup file")
-            progress(total, total)
-        } catch (t: Throwable) {
-            tmp.delete()
-            throw t
+        val sealed = SealingStream(out.buffered(1 shl 20), key)
+        sealed.start(salt)
+        var written = 0L
+        fun put(b: ByteArray, off: Int = 0, len: Int = b.size) {
+            sealed.write(b, off, len); written += len
         }
+        put(ByteBuffer.allocate(8).putLong(content).array())
+        put(ByteBuffer.allocate(4).putInt(manifest.size).array())
+        put(manifest)
+        manifest.fill(0)
+        put(index)
+        index.fill(0)
+        settings?.let { put(it) }
+        val buf = ByteArray(256 * 1024)
+        try {
+            for (name in names) {
+                val size = storage.size(name)
+                storage.open(name).use { src ->
+                    var p = 0L
+                    while (p < size) {
+                        val n = src.read(p, buf, 0, minOf(buf.size.toLong(), size - p).toInt())
+                        if (n <= 0) throw IOException("$name ended early")
+                        put(buf, 0, n)
+                        p += n
+                    }
+                }
+                progress(written, total)
+            }
+        } finally {
+            buf.fill(0)
+        }
+        // Zeros up to the padded size, so the file's size says little about the vault's.
+        val zeros = ByteArray(64 * 1024)
+        while (written < total) put(zeros, 0, minOf(zeros.size.toLong(), total - written).toInt())
+        sealed.close()
+        return total
     }
 
     // ---- Restoring --------------------------------------------------------------------------
@@ -286,8 +317,14 @@ object Backup {
     fun restore(
         file: File, password: CharArray, store: VaultStore, folderName: String,
         holdsMasterKey: () -> Unit = {}, progress: (Long, Long) -> Unit,
+    ): Int = restore(file.inputStream(), password, store, folderName, holdsMasterKey, progress)
+
+    /** As above, reading the backup from [source] (one picked with Android's file picker), which is closed after. */
+    fun restore(
+        source: InputStream, password: CharArray, store: VaultStore, folderName: String,
+        holdsMasterKey: () -> Unit = {}, progress: (Long, Long) -> Unit,
     ): Int {
-        val input = file.inputStream().buffered(1 shl 20)
+        val input = source.buffered(1 shl 20)
         val salt = ByteArray(SALT); val prefix = ByteArray(PREFIX)
         try {
             DataInputStream(input).apply { readFully(salt); readFully(prefix) }

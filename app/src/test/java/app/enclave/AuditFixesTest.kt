@@ -1,6 +1,7 @@
 package app.enclave
 
 import app.enclave.crypto.Aead
+import app.enclave.ui.DirExportFolder
 import app.enclave.ui.freeName
 import app.enclave.ui.safeFileName
 import app.enclave.vault.ContainerStorage
@@ -36,6 +37,11 @@ class AuditFixesTest {
         assertEquals("ok.jpg", safeFileName("ok.jpg"))
         val dir = tmp()
         assertEquals(dir.canonicalFile, freeName(dir, "../../../escape").canonicalFile.parentFile)
+        // The same names inside a folder picked with Android's file picker.
+        val taken = setOf("photo.jpg", "photo (1).jpg", "notes")
+        assertEquals("photo (2).jpg", freeName("photo.jpg") { it in taken })
+        assertEquals("notes (1)", freeName("../notes") { it in taken })
+        assertEquals("evil.txt", freeName("../../evil.txt") { it in taken })
     }
 
     @Test
@@ -50,7 +56,7 @@ class AuditFixesTest {
 
         val parent = tmp()
         val target = File(parent, "export").apply { mkdirs() }
-        val n = store.exportTo(store.entries.value.filter { it.parent == null }.map { it.id }, target, ::freeName)
+        val n = store.exportTo(store.entries.value.filter { it.parent == null }.map { it.id }, DirExportFolder(target))
         assertEquals(2, n)
         // Nothing was written next to (or above) the chosen folder.
         assertEquals(listOf("export"), parent.list()!!.toList())

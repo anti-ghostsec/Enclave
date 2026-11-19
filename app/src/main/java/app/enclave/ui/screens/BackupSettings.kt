@@ -1,5 +1,8 @@
 package app.enclave.ui.screens
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -20,26 +23,27 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
-import app.enclave.ui.BrowseMode
 import app.enclave.ui.PasswordField
 import app.enclave.ui.SectionTitle
-import app.enclave.ui.StorageBrowser
+import app.enclave.ui.leavingOnPurpose
 import app.enclave.ui.toast
 import app.enclave.vault.Backup
 import app.enclave.vault.Session
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 private sealed interface BackupStep {
     data object AskNewPassword : BackupStep
-    class PickFolder(val password: String) : BackupStep
+    /** Android's file picker is open to choose where the backup goes. */
+    class PickTarget(val password: String) : BackupStep
+    /** Android's file picker is open to choose a backup to restore. */
     data object PickFile : BackupStep
-    class AskPassword(val file: File) : BackupStep
+    class AskPassword(val file: Uri) : BackupStep
     class Working(val title: String, val done: Long = 0, val total: Long = 0) : BackupStep
 }
 
@@ -49,18 +53,6 @@ fun BackupSettings(s: Session.Unlocked) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var step by remember { mutableStateOf<BackupStep?>(null) }
-
-    SectionTitle("Backup")
-    Text(
-        "One encrypted file with everything in this vault, protected only by a password you choose. " +
-            "It can be restored on another phone. Unlike the vault, it doesn't need this phone's security chip, " +
-            "so it's only as strong as its password.",
-        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        OutlinedButton(onClick = { step = BackupStep.AskNewPassword }) { Text("Create encrypted backup") }
-        OutlinedButton(onClick = { step = BackupStep.PickFile }) { Text("Restore from a backup") }
-    }
 
     fun run(title: String, work: ((Long, Long) -> Unit) -> String) {
         step = BackupStep.Working(title)
@@ -74,30 +66,57 @@ fun BackupSettings(s: Session.Unlocked) {
         }
     }
 
+    // The picker makes the (empty) file. If the backup then fails, Backup deletes it again.
+    val saveBackup = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        val st = step as? BackupStep.PickTarget
+        step = null
+        if (uri == null || st == null) return@rememberLauncherForActivityResult
+        run("Creating encrypted backup") { progress ->
+            Backup.create(s.store, st.password.toCharArray(), ctx.contentResolver, uri, progress)
+            val name = runCatching { androidx.documentfile.provider.DocumentFile.fromSingleUri(ctx, uri)?.name }.getOrNull()
+            if (name != null) "Backup saved as $name" else "Backup saved"
+        }
+    }
+    val pickBackup = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        step = if (uri != null && step == BackupStep.PickFile) BackupStep.AskPassword(uri) else null
+    }
+
+    SectionTitle("Backup")
+    Text(
+        "One encrypted file with everything in this vault, protected only by a password you choose. " +
+            "It can be restored on another phone. Unlike the vault, it doesn't need this phone's security chip, " +
+            "so it's only as strong as its password.",
+        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        OutlinedButton(onClick = { step = BackupStep.AskNewPassword }) { Text("Create encrypted backup") }
+        OutlinedButton(onClick = {
+            step = BackupStep.PickFile
+            leavingOnPurpose()
+            pickBackup.launch(arrayOf("*/*"))
+        }) { Text("Restore from a backup") }
+    }
+
     when (val st = step) {
         null -> Unit
         BackupStep.AskNewPassword -> NewBackupPasswordDialog(
             onDismiss = { step = null },
-            onOk = { step = BackupStep.PickFolder(it) },
+            onOk = {
+                step = BackupStep.PickTarget(it)
+                leavingOnPurpose()
+                saveBackup.launch("backup-" + SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date()) + ".bin")
+            },
         )
-        is BackupStep.PickFolder -> StorageBrowser(BrowseMode.FOLDER, onDismiss = { step = null }, confirmLabel = "Save backup here") { dirs ->
-            val name = "backup-" + SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date()) + ".bin"
-            val target = app.enclave.ui.freeName(dirs[0], name)
-            run("Creating encrypted backup") { progress ->
-                Backup.create(s.store, st.password.toCharArray(), target, progress)
-                "Backup saved as ${target.name}"
-            }
-        }
-        BackupStep.PickFile -> StorageBrowser(BrowseMode.FILE, onDismiss = { step = null }) { files ->
-            step = BackupStep.AskPassword(files[0])
-        }
+        // Nothing to show while Android's file picker is open.
+        is BackupStep.PickTarget, BackupStep.PickFile -> Unit
         is BackupStep.AskPassword -> BackupPasswordDialog(
             onDismiss = { step = null },
             onOk = { pw ->
                 val folder = "Restored " + SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
                 run("Restoring backup") { progress ->
                     var old = false
-                    val n = Backup.restore(st.file, pw.toCharArray(), s.store, folder, { old = true }, progress)
+                    val input = ctx.contentResolver.openInputStream(st.file) ?: throw IOException("Couldn't open that file")
+                    val n = Backup.restore(input, pw.toCharArray(), s.store, folder, { old = true }, progress)
                     "Restored $n file(s) into “$folder”" + if (old) {
                         "\n\nThis backup was made by an earlier version and also holds the key to the vault " +
                             "it came from. Make a new backup now, then delete this file and any copies of it."

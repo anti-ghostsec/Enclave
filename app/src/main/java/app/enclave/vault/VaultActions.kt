@@ -224,20 +224,21 @@ object VaultActions {
     }
 
     /**
-     * Adds [files] to a decoy from the session that made it. Returns how many were added, or -1
-     * if the decoy couldn't be opened. For an entry a decoy session only pretends to have, the
-     * files are read and counted and nothing is kept, like everything else in that session.
+     * Adds the files picked as [uris] to a decoy from the session that made it. Returns how many
+     * were added, or -1 if the decoy couldn't be opened. For an entry a decoy session only
+     * pretends to have, the files are read and counted and nothing is kept, like everything else
+     * in that session.
      */
-    fun fillDecoy(d: DuressSlot, files: List<java.io.File>): Int {
+    fun fillDecoy(d: DuressSlot, cr: android.content.ContentResolver, uris: List<android.net.Uri>): Int {
         val s = Session.current ?: return -1
         if (s.role != Role.MAIN) {
             if (d.slot >= 0) return -1
             val buf = ByteArray(64 * 1024)
-            return files.count { f -> runCatching { f.inputStream().use { while (it.read(buf) >= 0) Unit } }.isSuccess }.also { buf.fill(0) }
+            return uris.count { u -> runCatching { cr.openInputStream(u)!!.use { while (it.read(buf) >= 0) Unit } }.isSuccess }.also { buf.fill(0) }
         }
         val decoy = openDecoyForFilling(d) ?: return -1
         try {
-            return files.count { f -> runCatching { decoy.importFile(f, null) }.isSuccess }
+            return uris.count { u -> runCatching { decoy.import(cr, u, null) }.isSuccess }
         } finally {
             decoy.close()
         }
