@@ -23,10 +23,12 @@
 //! * Volumes are layered. A volume can be made "above" others, and unlocking
 //!   it unlocks those too. Give the lowest one's password under pressure;
 //!   the ones above stay invisible.
-//! * Each save also rewrites some free blocks with new random bytes (cover
-//!   writes), so that comparing two copies of the disk taken at different
-//!   times shows changes that a lower volume can't account for, whatever
-//!   volume really made them.
+//! * Each save also rewrites free blocks with new random bytes (cover
+//!   writes) until the number of blocks changed since the last save reaches
+//!   a target drawn at random between the cover budget and twice it. The
+//!   target doesn't depend on what was written, so as long as a save
+//!   changes fewer blocks than the budget, comparing two copies of the disk
+//!   shows the same number of changes whether or not a hidden volume wrote.
 //!
 //! # What it doesn't do
 //!
@@ -34,9 +36,15 @@
 //!   only a lower volume unlocked (including the cover writes) can overwrite
 //!   the volumes above it. Day to day, always unlock with the top password.
 //! * Comparing copies of the disk is hidden only as well as the cover writes
-//!   hide it: when a lower volume never changes while the disk does, cover
-//!   writes are the only explanation on offer. On flash storage the
-//!   controller can keep old copies of blocks the app can't reach.
+//!   hide it. A save that changes more blocks than the target has no cover
+//!   left to give, so it shows its real size: someone with a lower password
+//!   who sees more changed blocks than the budget allows, and fewer of them
+//!   explained by the volumes they can open, learns that something else
+//!   wrote. Save hidden volumes often, in pieces smaller than the budget
+//!   ([`Store::set_cover`]), or choose a budget above the largest save. Cover
+//!   writes also show that the container is in use, whatever is in it. On
+//!   flash storage the controller can keep old copies of blocks the app
+//!   can't reach.
 //! * Someone who can write to the disk can roll a block back to an older
 //!   version of itself; that's detected only if it breaks the volume.
 //! * The container's size is plain to see, and so is the fact that a
@@ -70,6 +78,8 @@ pub const PAYLOAD: usize = BLOCK - NONCE - TAG;
 const SALT: usize = 32;
 /// Positions tried for a volume's superblock.
 const SLOT_CANDIDATES: u64 = 64;
+/// The default cover budget: 256 blocks, 1 MiB. See [`Store::set_cover`].
+pub const DEFAULT_COVER: u32 = 256;
 /// Volumes directly below one volume.
 pub const MAX_BELOW: usize = 16;
 const MAP_ENTRIES: usize = (PAYLOAD - 8) / 4;
@@ -222,9 +232,9 @@ pub struct Store<D: BlockDevice> {
     used_count: u32,
     volumes: Vec<Option<Volume>>,
     noise: Noise,
-    cover_per_write: u32,
-    cover_min: u32,
-    writes: u64,
+    cover_budget: u32,
+    /// Every block written since the last save, cover writes aside.
+    touched: HashSet<u32>,
 }
 
 impl<D: BlockDevice> Store<D> {
@@ -277,21 +287,24 @@ impl<D: BlockDevice> Store<D> {
             used_count: 0,
             volumes: Vec::new(),
             noise: Noise::new()?,
-            cover_per_write: 1,
-            cover_min: 8,
-            writes: 0,
+            cover_budget: DEFAULT_COVER,
+            touched: HashSet::new(),
         };
         // Block 0 holds the salt.
         store.mark(0)?;
         Ok(store)
     }
 
-    /// How many free blocks each save rewrites with random bytes: `per_write`
-    /// for every block it really wrote, and at least `min`. 0 and 0 turns
-    /// cover writes off.
-    pub fn set_cover(&mut self, per_write: u32, min: u32) {
-        self.cover_per_write = per_write;
-        self.cover_min = min;
+    /// The cover budget, in blocks (default [`DEFAULT_COVER`], 1 MiB). Each
+    /// save changes at least a random number of blocks between `budget` and
+    /// twice it, padding with cover writes, so saves of hidden volumes
+    /// smaller than `budget` can't be told apart from the lower volumes'
+    /// own. 0 turns cover writes off.
+    ///
+    /// Use the same budget every time: a budget that changes with which
+    /// password was given is itself a tell.
+    pub fn set_cover(&mut self, budget: u32) {
+        self.cover_budget = budget;
     }
 
     /// The volume's key, from its password.
@@ -374,16 +387,37 @@ impl<D: BlockDevice> Store<D> {
             fresh: HashSet::new(),
             dirty: false,
         };
-        let id = VolumeId(self.volumes.len());
+        let start = self.volumes.len();
+        let id = VolumeId(start);
         self.volumes.push(Some(volume));
-        self.open_below(id)?;
-        if other.is_none() {
-            let keys = &self.volume(id)?.keys;
-            let spare = self.candidates(keys).into_iter().find(|&s| s != *slot && !self.is_used(s)).ok_or(Error::Full)?;
-            self.mark(spare)?;
-            self.volume_mut(id)?.slots[1] = spare;
+        let finished = self.open_below(id).and_then(|()| {
+            if other.is_none() {
+                let keys = &self.volume(id)?.keys;
+                let spare = self.candidates(keys).into_iter().find(|&s| s != *slot && !self.is_used(s)).ok_or(Error::Full)?;
+                self.mark(spare)?;
+                self.volume_mut(id)?.slots[1] = spare;
+            }
+            Ok(())
+        });
+        if let Err(e) = finished {
+            // Nothing half-unlocked may stay behind: the next save would
+            // write it out, and a volume without its second slot would put
+            // its superblock on block 0, over the salt.
+            self.forget_from(start);
+            return Err(e);
         }
         Ok(id)
+    }
+
+    /// Forgets the volumes from `start` on, unlocked by a call that failed,
+    /// and gives back the blocks they claimed. Nothing on the disk changes.
+    fn forget_from(&mut self, start: usize) {
+        for v in self.volumes.drain(start..).flatten().collect::<Vec<_>>() {
+            let blocks = v.slots.iter().chain(&v.map_blocks).chain(&v.map).copied();
+            for b in blocks.filter(|&b| b != 0) {
+                self.unmark(b);
+            }
+        }
     }
 
     fn open_below(&mut self, id: VolumeId) -> Result<()> {
@@ -517,7 +551,8 @@ impl<D: BlockDevice> Store<D> {
         r
     }
 
-    /// Saves every changed volume, then makes the cover writes.
+    /// Saves every changed volume, then makes the cover writes (see
+    /// [`Store::set_cover`]).
     ///
     /// When any volume changed, every unlocked volume is saved, changed or
     /// not: otherwise a hidden volume's save would leave the lower ones'
@@ -535,12 +570,13 @@ impl<D: BlockDevice> Store<D> {
             self.volumes[i] = Some(v);
             r?;
         }
-        let real = std::mem::take(&mut self.writes);
-        // Between the floor and twice it, drawn afresh each time, so the
-        // count says little about how much was really written.
-        let floor = (real.saturating_mul(self.cover_per_write as u64)).max(self.cover_min as u64);
-        let cover = floor + random_u64()? % floor.saturating_add(1);
-        self.cover(cover)?;
+        // A target for the blocks changed by this save, drawn without
+        // looking at what was written: the real writes count towards it,
+        // and cover writes make up the rest.
+        let budget = self.cover_budget as u64;
+        let target = budget + random_u64()? % (budget + 1);
+        self.cover(target)?;
+        self.touched.clear();
         self.dev.sync()?;
         Ok(())
     }
@@ -784,6 +820,12 @@ impl<D: BlockDevice> Store<D> {
             sup[SUPER_HEAD + i * 32..SUPER_HEAD + (i + 1) * 32].copy_from_slice(&k[..]);
         }
         let next = 1 - v.current;
+        if v.slots[next] == 0 {
+            // Block 0 is the salt; a superblock there would wreck the
+            // whole container. Only a bug can get here.
+            new_map.into_iter().for_each(|b| self.unmark(b));
+            return Err(Error::Damaged);
+        }
         if let Err(e) = self.write_sealed(&v.keys, KIND_SUPER, v.slots[next], &sup).and_then(|()| Ok(self.dev.sync()?)) {
             // The new superblock may have reached the disk or not, so both
             // states have to stay whole: the old one keeps its blocks, and
@@ -869,8 +911,8 @@ impl<D: BlockDevice> Store<D> {
             .encrypt_in_place_detached(&nonce, &aad(&self.salt, kind, index), &mut block[NONCE..NONCE + PAYLOAD])
             .map_err(|_| Error::Damaged)?;
         block[NONCE + PAYLOAD..].copy_from_slice(&tag);
+        self.touched.insert(index);
         self.dev.write(index as u64, &block)?;
-        self.writes += 1;
         Ok(())
     }
 
@@ -878,34 +920,45 @@ impl<D: BlockDevice> Store<D> {
     fn scrub(&mut self, index: u32) -> Result<()> {
         let mut block = Zeroizing::new([0u8; BLOCK]);
         self.noise.fill(&mut block[..])?;
+        self.touched.insert(index);
         self.dev.write(index as u64, &block)?;
         self.unmark(index);
         Ok(())
     }
 
-    /// Rewrites `count` random free blocks with new random bytes.
-    fn cover(&mut self, count: u64) -> Result<()> {
-        let free = self.blocks as u64 - self.used_count as u64;
+    /// Rewrites random free blocks with new random bytes, each at most once,
+    /// until `target` different blocks have changed since the last save (or
+    /// there are no more to change).
+    fn cover(&mut self, target: u64) -> Result<()> {
         let mut block = Zeroizing::new([0u8; BLOCK]);
-        for _ in 0..count.min(free) {
-            let Some(b) = self.random_free() else { break };
+        let mut covered = HashSet::new();
+        while ((self.touched.len() + covered.len()) as u64) < target {
+            let pick = self.random_free_where(|b| !self.touched.contains(&b) && !covered.contains(&b));
+            let Some(b) = pick else { break };
             self.noise.fill(&mut block[..])?;
             self.dev.write(b as u64, &block)?;
+            covered.insert(b);
         }
         Ok(())
     }
 
     fn random_free(&self) -> Option<u32> {
+        self.random_free_where(|_| true)
+    }
+
+    /// A random free block that `ok` accepts.
+    fn random_free_where(&self, ok: impl Fn(u32) -> bool) -> Option<u32> {
         let span = self.blocks as u64 - 1;
+        let fits = |b: u32| !self.is_used(b) && ok(b);
         for _ in 0..64 {
             let b = 1 + (random_u64().ok()? % span) as u32;
-            if !self.is_used(b) {
+            if fits(b) {
                 return Some(b);
             }
         }
         // Nearly full: look from a random place onwards.
         let start = random_u64().ok()? % span;
-        (0..span).map(|k| 1 + ((start + k) % span) as u32).find(|&b| !self.is_used(b))
+        (0..span).map(|k| 1 + ((start + k) % span) as u32).find(|&b| fits(b))
     }
 
     fn allocate(&mut self) -> Result<u32> {

@@ -1,8 +1,10 @@
-# Enclave's deniable storage crate. It inherits nothing from the workspace.
+# The maintained copy of this crate. Enclave carries a vendored copy (see the
+# README); nothing else depends on it yet. It inherits nothing from any
+# workspace.
 [package]
 name = "deniable"
 description = "Deniable storage: encrypted volumes hidden in a container of random bytes"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false

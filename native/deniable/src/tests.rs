@@ -5,12 +5,20 @@ use super::*;
 /// Cheap enough for tests; real use takes [`Kdf::DEFAULT`] or more.
 const FAST: Kdf = Kdf { memory_kib: 64, passes: 1, lanes: 1 };
 
+/// A small cover budget keeps the tests that fail every write in turn quick;
+/// the tests about cover writes set their own.
+const TEST_COVER: u32 = 8;
+
 fn fresh(blocks: u64) -> Store<MemDevice> {
-    Store::format_with(MemDevice::new(blocks), FAST).unwrap()
+    let mut store = Store::format_with(MemDevice::new(blocks), FAST).unwrap();
+    store.set_cover(TEST_COVER);
+    store
 }
 
 fn reopen(store: Store<MemDevice>) -> Store<MemDevice> {
-    Store::open_with(store.into_device(), FAST).unwrap()
+    let mut store = Store::open_with(store.into_device(), FAST).unwrap();
+    store.set_cover(TEST_COVER);
+    store
 }
 
 fn read_all(store: &mut Store<MemDevice>, id: VolumeId) -> Vec<u8> {
@@ -721,6 +729,7 @@ const BOTTOM: usize = 7000;
 /// to fail.
 fn flaky(old: &[u8]) -> (Store<Flaky>, VolumeId, VolumeId) {
     let mut store = Store::format_with(Flaky { inner: MemDevice::new(256), fail_in: None, failed: false }, FAST).unwrap();
+    store.set_cover(TEST_COVER);
     let decoy = store.create(b"decoy", &[]).unwrap();
     let hidden = store.create(b"hidden", &[decoy]).unwrap();
     store.write(decoy, 0, &pattern(BOTTOM, 1)).unwrap();
@@ -837,7 +846,7 @@ fn a_save_that_fails_while_tidying_up_is_still_a_save() {
     let old = pattern(3 * PAYLOAD, 7);
     let new = pattern(3 * PAYLOAD, 8);
     let (mut store, _, hidden) = flaky(&old);
-    store.set_cover(0, 0);
+    store.set_cover(0);
     store.write(hidden, 0, &new).unwrap();
     // The decoy saves first: one map block, a sync, its superblock, a sync,
     // and the old map block overwritten. The hidden volume's save is the
@@ -940,4 +949,110 @@ fn the_cover_write_count_varies() {
         counts.insert(store.dev.1 - start);
     }
     assert!(counts.len() > 1, "every save wrote the same number of blocks");
+}
+
+/// A volume with one surviving superblock, in a container with no free
+/// place for the second: unlocking it fails, and must leave nothing behind
+/// that a later save could write to block 0, where the salt is.
+#[test]
+fn a_failed_unlock_in_a_full_container_leaves_the_container_whole() {
+    let mut store = fresh(256);
+    let a = store.create(b"a", &[]).unwrap();
+    store.write(a, 0, b"first").unwrap();
+    store.flush().unwrap();
+    store.write(a, 0, b"second").unwrap();
+    store.flush().unwrap();
+    let b = store.create(b"b", &[]).unwrap();
+    store.write(b, 0, b"keep me").unwrap();
+    store.flush().unwrap();
+    let a_slots = store.volume(a).unwrap().slots;
+    let a_current = store.volume(a).unwrap().current;
+    let a_keys = derive(&store.volume(a).unwrap().master);
+    let a_blocks: Vec<u32> = store.volume(a).unwrap().map_blocks.iter().chain(&store.volume(a).unwrap().map).copied().collect();
+
+    // Lose A's older superblock, as a session that didn't know about A would.
+    let mut store = reopen(store);
+    let mut junk = [0u8; BLOCK];
+    random(&mut junk).unwrap();
+    store.dev.write(a_slots[1 - a_current] as u64, &junk).unwrap();
+
+    let b = store.unlock(b"b").unwrap();
+    // Every other place A's second superblock could go is taken.
+    for c in store.candidates(&a_keys) {
+        if c != a_slots[a_current] && !a_blocks.contains(&c) && !store.is_used(c) {
+            store.mark(c).unwrap();
+        }
+    }
+    let used = store.used_count;
+    let r = store.unlock(b"a");
+    assert!(matches!(r, Err(Error::Full)), "{:?}", r.map(|_| ()));
+    assert_eq!(store.volumes(), vec![b], "the failed unlock left a volume behind");
+    assert_eq!(store.used_count, used, "the failed unlock kept blocks claimed");
+
+    store.write(b, 0, b"still here").unwrap();
+    store.flush().unwrap();
+    let mut store = reopen(store);
+    let b = store.unlock(b"b").unwrap();
+    assert_eq!(read_all(&mut store, b), b"still here");
+}
+
+fn snapshot(store: &mut Store<MemDevice>) -> Vec<[u8; BLOCK]> {
+    (0..store.blocks as u64)
+        .map(|i| {
+            let mut b = [0u8; BLOCK];
+            store.dev.read(i, &mut b).unwrap();
+            b
+        })
+        .collect()
+}
+
+fn changed(a: &[[u8; BLOCK]], b: &[[u8; BLOCK]]) -> usize {
+    a.iter().zip(b).filter(|(x, y)| x != y).count()
+}
+
+/// Two copies of the disk, taken around a save, show as many changed blocks
+/// whether a hidden volume wrote or not, as long as the save fits in the
+/// cover budget. The count is drawn between the budget and twice it.
+#[test]
+fn hidden_writes_inside_the_budget_dont_change_what_a_snapshot_shows() {
+    const BUDGET: u32 = 64;
+    let mut store = fresh(2048);
+    store.set_cover(BUDGET);
+    let decoy = store.create(b"decoy", &[]).unwrap();
+    let hidden = store.create(b"hidden", &[decoy]).unwrap();
+    store.write(decoy, 0, &pattern(PAYLOAD * 4, 1)).unwrap();
+    store.write(hidden, 0, &pattern(PAYLOAD * 40, 2)).unwrap();
+    store.flush().unwrap();
+
+    let mut seen = [Vec::new(), Vec::new()];
+    for round in 0..16u8 {
+        let with_hidden = round % 2 == 1;
+        let before = snapshot(&mut store);
+        store.write(decoy, 0, &[round; 100]).unwrap();
+        if with_hidden {
+            // 20 blocks of hidden data, well inside the budget.
+            store.write(hidden, 0, &pattern(PAYLOAD * 20, round)).unwrap();
+        }
+        store.flush().unwrap();
+        let n = changed(&before, &snapshot(&mut store));
+        assert!((BUDGET as usize..=2 * BUDGET as usize).contains(&n), "{n} blocks changed, hidden: {with_hidden}");
+        seen[with_hidden as usize].push(n);
+    }
+    // Both kinds of save spread over the same range, not one above the other.
+    let mean = |v: &Vec<usize>| v.iter().sum::<usize>() as f64 / v.len() as f64;
+    assert!((mean(&seen[0]) - mean(&seen[1])).abs() < BUDGET as f64 * 0.75, "{seen:?}");
+}
+
+/// With cover writes off, a save changes only what it wrote.
+#[test]
+fn no_budget_no_cover_writes() {
+    let mut store = fresh(1024);
+    store.set_cover(0);
+    let id = store.create(b"pw", &[]).unwrap();
+    store.flush().unwrap();
+    let before = snapshot(&mut store);
+    store.write(id, 0, b"x").unwrap();
+    store.flush().unwrap();
+    // A data block, a map block, the superblock and the old map scrubbed.
+    assert!(changed(&before, &snapshot(&mut store)) <= 4);
 }
