@@ -49,7 +49,7 @@ An encrypted file vault for Android. No ads, no internet permission, no analytic
 - Large files added to a decoy opened on its own are kept, encrypted, in a scratch folder until it locks. The folder is always there, but someone who can read Enclave's private files while it's unlocked would see files in it. That takes root on a running phone, which can read the keys from memory anyway.
 - Restoring a backup made by 0.4.0 shows a reminder to replace it.
 - The hardware key can be used while the phone itself is locked (by code already running as Enclave), not only while it's unlocked.
-- Passwords typed into the UI pass through immutable strings that can't be wiped from memory.
+- Locking zeroes the keys Enclave holds as bytes: the master key, the index and settings keys, and every file's key. Some secrets also pass through text, which can't be zeroed and stays in memory until it happens to be reused: passwords typed into the UI, the vault's index (which holds every file's key) while it's read or saved, and, while the real vault is unlocked, its settings, which hold each decoy's key. Someone who can read Enclave's memory while it runs (root, or a debugger) could find them.
 - The folder browser needs Android's "All files access" permission.
 
 ## Upgrading from earlier versions

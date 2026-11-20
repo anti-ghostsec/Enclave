@@ -6,7 +6,13 @@ import kotlinx.coroutines.flow.StateFlow
 import java.util.Base64
 import kotlin.concurrent.thread
 
-/** The unlocked vault lives only in memory. Locking zeroes the keys and forgets everything. */
+/**
+ * The unlocked vault lives only in memory. Locking zeroes the keys held as bytes (the master key,
+ * the index and settings keys, every file's key) and drops everything else. What passed through
+ * text on the way (the index and settings as they're read and saved, a decoy's key in the
+ * settings, typed passwords) can't be zeroed and is left to the garbage collector: see the
+ * README's known limits.
+ */
 object Session {
     class Unlocked(val role: Role, val slot: Int, val master: ByteArray, val store: VaultStore) {
         /**

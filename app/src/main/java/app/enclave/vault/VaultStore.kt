@@ -123,9 +123,30 @@ class VaultStore(
     /** SHA-256 of what each file imported in this session held when it was read, by id. */
     private val importedHashes = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
 
+    /**
+     * Each file's key, by id, kept as bytes that are zeroed when the vault closes. The entries in
+     * [entries] carry no key: the index on disk has them as text, which is only put back for as
+     * long as it takes to save it (see [withKeys]).
+     */
+    private val fileKeys = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
+
     init {
-        storage.loadIndex()?.let { _entries.value = json.decodeFromString<Index>(String(Aead.open(indexKey, it))).entries }
-        storage.loadSettings()?.let { _settings.value = json.decodeFromString(String(Aead.open(settingsKey, it))) }
+        storage.loadIndex()?.let {
+            val plain = Aead.open(indexKey, it)
+            try {
+                _entries.value = takeKeys(json.decodeFromString<Index>(String(plain)).entries)
+            } finally {
+                plain.fill(0)
+            }
+        }
+        storage.loadSettings()?.let {
+            val plain = Aead.open(settingsKey, it)
+            try {
+                _settings.value = json.decodeFromString(String(plain))
+            } finally {
+                plain.fill(0)
+            }
+        }
         beforeWriting(_settings.value)
         if (!storage.readOnly) removeLeftovers()
     }
@@ -150,17 +171,48 @@ class VaultStore(
     private fun updateEntries(change: (List<Entry>) -> List<Entry>): Boolean {
         if (closed) return false
         val before = _entries.value
-        val after = change(before)
+        val after = takeKeys(change(before))
         if (after == before) return false
         try {
-            storage.saveIndex(Aead.seal(indexKey, json.encodeToString(Index(after)).toByteArray()))
+            val plain = json.encodeToString(Index(withKeys(after))).toByteArray()
+            try {
+                storage.saveIndex(Aead.seal(indexKey, plain))
+            } finally {
+                plain.fill(0)
+            }
         } catch (e: java.io.IOException) {
             problem.value = shown(e)
+            dropKeysNotIn(before)
             return false
         }
         _entries.value = after
+        dropKeysNotIn(after)
         return true
     }
+
+    /** Moves the keys in [list] into [fileKeys], and returns its entries without them. */
+    private fun takeKeys(list: List<Entry>): List<Entry> = list.map { e ->
+        if (e.key.isEmpty()) e else {
+            runCatching { Base64.decode(e.key, Base64.NO_WRAP) }.getOrNull()?.let { k ->
+                fileKeys.put(e.id, k)?.fill(0)
+            }
+            e.copy(key = "")
+        }
+    }
+
+    /** [list] with each file's key put back as text, only to be saved. */
+    private fun withKeys(list: List<Entry>): List<Entry> = list.map { e ->
+        fileKeys[e.id]?.let { e.copy(key = Base64.encodeToString(it, Base64.NO_WRAP)) } ?: e
+    }
+
+    /** Zeroes and forgets the keys of files that aren't in [list]. */
+    private fun dropKeysNotIn(list: List<Entry>) {
+        val live = list.mapTo(HashSet()) { it.id }
+        fileKeys.keys.filter { it !in live }.forEach { id -> fileKeys.remove(id)?.fill(0) }
+    }
+
+    /** Every entry with its key, as the index on disk has them: for a backup. */
+    internal fun entriesWithKeys(): List<Entry> = withKeys(_entries.value)
 
     /** Changes the settings. Returns false if they couldn't be saved (see [problem]). */
     @Synchronized
@@ -168,7 +220,12 @@ class VaultStore(
         if (closed) return false
         val s = f(_settings.value)
         try {
-            storage.saveSettings(Aead.seal(settingsKey, json.encodeToString(s).toByteArray()))
+            val plain = json.encodeToString(s).toByteArray()
+            try {
+                storage.saveSettings(Aead.seal(settingsKey, plain))
+            } finally {
+                plain.fill(0)
+            }
         } catch (e: java.io.IOException) {
             problem.value = shown(e)
             return false
@@ -182,7 +239,10 @@ class VaultStore(
         if (e is java.io.FileNotFoundException) "Couldn't save" else e.message ?: "Couldn't save"
 
     private fun newId() = Aead.hex(Aead.random(16))
-    private fun keyOf(e: Entry) = Base64.decode(e.key, Base64.NO_WRAP)
+    /** A copy of one file's key, for the caller to zero when done. */
+    private fun keyOf(e: Entry): ByteArray =
+        fileKeys[e.id]?.copyOf()
+            ?: if (e.key.isNotEmpty()) Base64.decode(e.key, Base64.NO_WRAP) else throw IllegalStateException("vault is locked")
 
     fun children(parent: String?) = _entries.value.filter { it.parent == parent }
 
@@ -234,7 +294,7 @@ class VaultStore(
             val e = Entry(id, parent, name, false, size, mime, System.currentTimeMillis(), Base64.encodeToString(key, Base64.NO_WRAP))
             if (!updateEntries { it + e }) error(problem.value ?: "vault is locked")
             importedHashes[id] = sourceHash
-            return e
+            return e.copy(key = "")
         } catch (t: Throwable) {
             runCatching { storage.delete(id) }
             runCatching { storage.delete(thumbName(id)) }
@@ -269,7 +329,14 @@ class VaultStore(
         }
     }
 
-    fun reader(e: Entry) = ChunkedCipher.Reader(storage.open(e.id), keyOf(e), e.size)
+    fun reader(e: Entry): ChunkedCipher.Reader {
+        val key = keyOf(e)
+        try {
+            return ChunkedCipher.Reader(storage.open(e.id), key, e.size)
+        } finally {
+            key.fill(0)
+        }
+    }
 
     /**
      * How a share reads this file's (still encrypted) bytes. Small files are copied into memory
@@ -353,7 +420,7 @@ class VaultStore(
     fun thumbnail(e: Entry): Bitmap? {
         if (!Media.isImage(e) && !Media.isVideo(e)) return null
         thumbs.get(e.id)?.let { return it }
-        val key = keyOf(e)
+        val key = runCatching { keyOf(e) }.getOrNull() ?: return null
         try {
             val state = thumbState(e.id, key)
             if (state == THUMB_NONE) return null
@@ -574,8 +641,12 @@ class VaultStore(
         indexKey.fill(0); settingsKey.fill(0)
         importedHashes.values.forEach { it.fill(0) }
         importedHashes.clear()
+        fileKeys.values.forEach { it.fill(0) }
+        fileKeys.clear()
         thumbs.evictAll()
         _entries.value = emptyList()
+        // They list the decoys' master keys.
+        _settings.value = VaultSettings()
         pendingShare.value = null
         problem.value = null
     }

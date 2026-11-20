@@ -184,7 +184,7 @@ object Backup {
         if (entries.isEmpty()) throw IOException("the vault has nothing to back up")
         val old = oldFormatMaster != null
         // The list of files as it is, protected by the backup's own encryption and nothing else.
-        val index = if (old) storage.loadIndex()!! else json.encodeToString(SavedIndex(entries)).toByteArray()
+        val index = if (old) storage.loadIndex()!! else json.encodeToString(SavedIndex(store.entriesWithKeys())).toByteArray()
         val settings = if (old) storage.loadSettings() else null
         val wanted = entries.filter { !it.folder }.flatMap { listOf(it.id, it.id + ".t") }.toSet()
         val names = storage.names().filter { it in wanted }.sorted()

@@ -123,10 +123,13 @@ object ChunkedCipher {
 
     /**
      * Random-access reader over an encrypted file. [realSize] is the original length from the
-     * index; it's required to strip the padding from version 2 files.
+     * index; it's required to strip the padding from version 2 files. The reader keeps its own
+     * copy of [key], zeroed by [close]; the caller's stays the caller's to wipe.
      */
-    class Reader(private val source: BlobSource, private val key: ByteArray, realSize: Long) : Closeable {
+    class Reader(private val source: BlobSource, key: ByteArray, realSize: Long) : Closeable {
         constructor(file: File, key: ByteArray, realSize: Long) : this(FileBlob(file), key, realSize)
+
+        private val key: ByteArray = key.copyOf()
 
         private val prefix: ByteArray
         private val chunks: Int
@@ -221,8 +224,10 @@ object ChunkedCipher {
             override fun available(): Int = minOf(Int.MAX_VALUE.toLong(), size - pos).toInt()
         }
 
+        @Synchronized
         override fun close() {
             cached.fill(0)
+            key.fill(0)
             source.close()
         }
     }
