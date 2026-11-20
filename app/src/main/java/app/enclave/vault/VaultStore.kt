@@ -140,7 +140,7 @@ class VaultStore(
         storage.loadIndex()?.let {
             val plain = Aead.open(indexKey, it)
             try {
-                _entries.value = takeKeys(json.decodeFromString<Index>(String(plain)).entries)
+                _entries.value = takeKeys(json.decodeFromString<Index>(String(plain)).entries, fileKeys)
             } finally {
                 plain.fill(0)
             }
@@ -177,10 +177,16 @@ class VaultStore(
     private fun updateEntries(change: (List<Entry>) -> List<Entry>): Boolean {
         if (closed) return false
         val before = _entries.value
-        val after = takeKeys(change(before))
-        if (after == before) return false
+        // New keys are held apart until the index holding them is saved: should the save fail,
+        // the keys in memory still match the index on the disk.
+        val pending = HashMap<String, ByteArray>()
+        val after = takeKeys(change(before), pending)
+        if (after == before) {
+            pending.values.forEach { it.fill(0) }
+            return false
+        }
         try {
-            val plain = json.encodeToString(Index(withKeys(after))).toByteArray()
+            val plain = json.encodeToString(Index(withKeys(after, pending))).toByteArray()
             try {
                 storage.saveIndex(Aead.seal(indexKey, plain))
             } finally {
@@ -188,27 +194,28 @@ class VaultStore(
             }
         } catch (e: java.io.IOException) {
             problem.value = shown(e)
-            dropKeysNotIn(before)
+            pending.values.forEach { it.fill(0) }
             return false
         }
+        pending.forEach { (id, k) -> fileKeys.put(id, k)?.takeIf { it !== k }?.fill(0) }
         _entries.value = after
         dropKeysNotIn(after)
         return true
     }
 
-    /** Moves the keys in [list] into [fileKeys], and returns its entries without them. */
-    private fun takeKeys(list: List<Entry>): List<Entry> = list.map { e ->
+    /** Moves the keys in [list] into [into], and returns its entries without them. */
+    private fun takeKeys(list: List<Entry>, into: MutableMap<String, ByteArray>): List<Entry> = list.map { e ->
         if (e.key.isEmpty()) e else {
             runCatching { Base64.decode(e.key, Base64.NO_WRAP) }.getOrNull()?.let { k ->
-                fileKeys.put(e.id, k)?.fill(0)
+                into.put(e.id, k)?.fill(0)
             }
             e.copy(key = "")
         }
     }
 
-    /** [list] with each file's key put back as text, only to be saved. */
-    private fun withKeys(list: List<Entry>): List<Entry> = list.map { e ->
-        fileKeys[e.id]?.let { e.copy(key = Base64.encodeToString(it, Base64.NO_WRAP)) } ?: e
+    /** [list] with each file's key put back as text, only to be saved; [newer] keys come first. */
+    private fun withKeys(list: List<Entry>, newer: Map<String, ByteArray> = emptyMap()): List<Entry> = list.map { e ->
+        (newer[e.id] ?: fileKeys[e.id])?.let { e.copy(key = Base64.encodeToString(it, Base64.NO_WRAP)) } ?: e
     }
 
     /** Zeroes and forgets the keys of files that aren't in [list]. */
@@ -217,7 +224,11 @@ class VaultStore(
         fileKeys.keys.filter { it !in live }.forEach { id -> fileKeys.remove(id)?.fill(0) }
     }
 
-    /** Every entry with its key, as the index on disk has them: for a backup. */
+    /**
+     * Every entry with its key, as the index on disk has them: for a backup. Taken under the same
+     * lock as every change, so a file deleted meanwhile is either in it with its key or not at all.
+     */
+    @Synchronized
     internal fun entriesWithKeys(): List<Entry> = withKeys(_entries.value)
 
     /** Changes the settings. Returns false if they couldn't be saved (see [problem]). */

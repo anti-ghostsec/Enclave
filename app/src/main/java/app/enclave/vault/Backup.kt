@@ -180,11 +180,13 @@ object Backup {
     internal fun write(store: VaultStore, oldFormatMaster: ByteArray?, password: CharArray, target: File, progress: (Long, Long) -> Unit) {
         val storage = store.storage
         storage.commit()
-        val entries = store.entries.value
+        // One snapshot of the list and its keys: taken apart, a file deleted in between would be
+        // written into the backup with no key.
+        val entries = store.entriesWithKeys()
         if (entries.isEmpty()) throw IOException("the vault has nothing to back up")
         val old = oldFormatMaster != null
         // The list of files as it is, protected by the backup's own encryption and nothing else.
-        val index = if (old) storage.loadIndex()!! else json.encodeToString(SavedIndex(store.entriesWithKeys())).toByteArray()
+        val index = if (old) storage.loadIndex()!! else json.encodeToString(SavedIndex(entries)).toByteArray()
         val settings = if (old) storage.loadSettings() else null
         val wanted = entries.filter { !it.folder }.flatMap { listOf(it.id, it.id + ".t") }.toSet()
         val names = storage.names().filter { it in wanted }.sorted()
