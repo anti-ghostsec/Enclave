@@ -126,8 +126,12 @@ object VaultManager {
         h.slots[i] = Aead.seal(kek, byteArrayOf(role.code) + master, h.slotAad(i))
     }
 
-    /** Creates a brand new vault and returns it unlocked. */
+    /**
+     * Creates a brand new vault and returns it unlocked. The lock-out state is saved before the
+     * header: once there's a header, a missing state file can only mean it was deleted.
+     */
     fun create(password: CharArray, keyfileSecret: ByteArray?): UnlockResult {
+        PlainPrefs.resetFailures()
         val h = Header(Kdf.DEFAULT, Aead.random(32), Array(Header.SLOT_COUNT) { Header.randomSlot() })
         val slot = slotRng.nextInt(Header.SLOT_COUNT)
         val master = Aead.random(Aead.KEY_BYTES)

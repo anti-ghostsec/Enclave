@@ -1,5 +1,6 @@
 package app.enclave.vault
 
+import android.os.SystemClock
 import app.enclave.crypto.Aead
 
 /** Higher-level vault operations used by the UI. All of these are slow (Argon2) — call off the main thread. */
@@ -32,11 +33,21 @@ object VaultActions {
         if (r == null) {
             val max = PlainPrefs.wipeAfterFailures
             if (max > 0 && PlainPrefs.failedAttempts >= max) {
-                // Destroy everything, but look exactly as before: the lock screen stays, and
-                // from now on every password is simply "wrong". The count of wrong passwords
-                // stays too, so the lock-out goes on growing as it would have.
-                wipeEverything(keepCount = true)
-                VaultManager.createUnopenable()
+                val wiped = PlainPrefs.wipedForFailuresMs
+                if (wiped == null) {
+                    // Destroy everything, but look exactly as before: the lock screen stays, and
+                    // from now on every password is simply "wrong". The count of wrong passwords
+                    // stays too, so the lock-out goes on growing as it would have.
+                    val start = SystemClock.elapsedRealtime()
+                    wipeEverything(keepCount = true)
+                    VaultManager.createUnopenable()
+                    PlainPrefs.wipedForFailuresMs = SystemClock.elapsedRealtime() - start
+                } else {
+                    // Already done once. Wiping again would write a new header (and make a new
+                    // hardware key) at every wrong password, which its file times would show.
+                    // Nothing is left to destroy: take as long as the wipe did, and write nothing.
+                    Thread.sleep(wiped.coerceIn(0, MAX_WIPE_WAIT_MS))
+                }
             }
             return Outcome.Wrong
         }
@@ -54,8 +65,19 @@ object VaultActions {
                 Session.open(VaultManager.create(password, null))
             }
         }
+        // The lock settings were replaced by the strictest ones (see PlainPrefs.distrust): the
+        // real vault, and only it, says so once it's open.
+        if (r.role == Role.MAIN && PlainPrefs.wasDistrusted) {
+            Session.current?.store?.let { store ->
+                store.problem.value = PlainPrefs.DISTRUSTED_MESSAGE
+                PlainPrefs.clearDistrusted()
+            }
+        }
         return Outcome.Opened
     }
+
+    /** The longest a wrong password after a wipe waits, whatever the wipe took. */
+    private const val MAX_WIPE_WAIT_MS = 10_000L
 
     /**
      * The lock settings as this session sees and changes them. They belong to the phone, not to

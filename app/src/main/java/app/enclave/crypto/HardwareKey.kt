@@ -81,5 +81,68 @@ object HardwareKey : KeystoreKey("enclave_header_v1", preferStrongBox = true)
 /**
  * Seals the settings Enclave needs while locked (disguise, lock-out state). Kept through a wipe,
  * so the app looks exactly the same afterwards. The TEE is enough here, and much faster.
+ *
+ * Every save is sealed by a brand-new key, and the key before it is deleted once the new file is
+ * in place. A copy of the file taken earlier (holding a lower count of wrong passwords) and put
+ * back can then no longer be opened: its key is gone. Normally one key exists; two only if a
+ * save was cut off, and the next load keeps whichever opens the file and deletes the other.
+ * Versions up to 0.5.3 used one fixed key, "enclave_state_v1", which is opened the same way and
+ * deleted at the first save.
  */
-object StateKey : KeystoreKey("enclave_state_v1", preferStrongBox = false)
+object StateKey {
+    private const val PREFIX = "enclave_state_"
+    private const val PROBE = "enclave_probe"
+
+    private fun keyStore() = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+
+    /** The state keys there are now. */
+    private fun aliases(): List<String> = keyStore().aliases().toList().filter { it.startsWith(PREFIX) }
+
+    /** What [open] found: the contents, and the key that opened them. */
+    class Opened(val plain: ByteArray, val alias: String)
+
+    /** Opens [sealed] with whichever state key it was sealed by, or null if none opens it. */
+    fun open(sealed: ByteArray): Opened? {
+        for (alias in aliases()) {
+            val plain = runCatching { KeystoreKey(alias, preferStrongBox = false).open(sealed) }.getOrNull()
+            if (plain != null) return Opened(plain, alias)
+        }
+        return null
+    }
+
+    /** Seals [plain] with a new key. Returns the sealed bytes and that key's alias. */
+    fun sealFresh(plain: ByteArray): Pair<ByteArray, String> {
+        val alias = PREFIX + Aead.hex(Aead.random(12))
+        val key = KeystoreKey(alias, preferStrongBox = false)
+        return try {
+            key.seal(plain) to alias
+        } catch (t: Throwable) {
+            key.destroy()
+            throw t
+        }
+    }
+
+    /** Deletes every state key but [keep]: call only once the file sealed by [keep] is in place. */
+    fun retireAllBut(keep: String) {
+        aliases().filter { it != keep }.forEach { KeystoreKey(it, preferStrongBox = false).destroy() }
+    }
+
+    /** Whether any state key exists, which means a state file was saved at some point. */
+    fun hasKeys(): Boolean = aliases().isNotEmpty()
+
+    /** Deletes a key [sealFresh] made whose file never got into place. */
+    fun discard(alias: String) = KeystoreKey(alias, preferStrongBox = false).destroy()
+
+    /** Whether the keystore works at all (it can fail for a while right after the phone starts). */
+    fun works(): Boolean {
+        val probe = KeystoreKey(PROBE, preferStrongBox = false)
+        return try {
+            val bytes = byteArrayOf(1, 2, 3)
+            probe.open(probe.seal(bytes)).contentEquals(bytes)
+        } catch (_: Exception) {
+            false
+        } finally {
+            probe.destroy()
+        }
+    }
+}
