@@ -42,7 +42,7 @@ object PlainPrefs {
                 // Sealed afresh at every start, so the newest state key and the file's change time
                 // say when Enclave last started, which a password typed or not.
                 persist()
-                if (!frontFile.exists()) saveFront()
+                if (!frontFile.exists()) saveFront() else frontFile.setLastModified(VaultStore.FIXED_TIME)
             }
         }
         moveOldPreferences()

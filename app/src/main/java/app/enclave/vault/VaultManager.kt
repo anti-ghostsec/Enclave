@@ -71,6 +71,9 @@ object VaultManager {
         // If Enclave was killed while unlocked, the containers written to since the last save
         // still show when. Every unlock sets the fixed time again; so does every start.
         stampAll(containersDir)
+        // Touched at every start too, so its change time says when Enclave last started rather
+        // than when a password was last changed (see the README's known limits).
+        if (headerFile.exists()) headerFile.setLastModified(VaultStore.FIXED_TIME)
     }
 
     /** Gives a directory and everything directly in it the fixed modified time. */
