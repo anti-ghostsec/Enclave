@@ -1,10 +1,12 @@
 package app.enclave
 
+import android.app.Activity
 import android.app.Application
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
@@ -23,6 +25,17 @@ class EnclaveApp : Application() {
     /** When the vault is due to lock, in time since boot (which keeps counting in sleep); 0 = not set. */
     @Volatile private var lockDue = 0L
 
+    /**
+     * The lock deadline set when Enclave last left the screen from its own main screen, and the
+     * vault it was for. Coming back only to the picker (which any app can open) doesn't move it
+     * later: see onStop.
+     */
+    @Volatile private var heldDue = 0L
+    @Volatile private var heldFor: java.lang.ref.WeakReference<Session.Unlocked>? = null
+
+    /** Whether Enclave's main screen was shown since it last left the screen. */
+    @Volatile private var mainShown = false
+
     /** How far time since boot was ahead of time awake when Enclave left the screen; -1 = not set. */
     @Volatile private var sleptAtStop = -1L
 
@@ -40,6 +53,18 @@ class EnclaveApp : Application() {
         VaultManager.init(this)
         PlainPrefs.forgetOldKeyfileLocation(this)
         app.enclave.disguise.Disguise.moveOldPicker(this)
+
+        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
+            override fun onActivityStarted(activity: Activity) {
+                if (activity is app.enclave.ui.MainActivity) mainShown = true
+            }
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+            override fun onActivityResumed(activity: Activity) {}
+            override fun onActivityPaused(activity: Activity) {}
+            override fun onActivityStopped(activity: Activity) {}
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+            override fun onActivityDestroyed(activity: Activity) {}
+        })
 
         // Auto-lock when Enclave leaves the screen. A picker Enclave opened, or a big file being
         // read by another app, gets a longer but always limited wait: see Session.lockDelayMs.
@@ -66,9 +91,24 @@ class EnclaveApp : Application() {
                 // Leaving because the screen turned off: don't wait for the message.
                 val power = getSystemService(android.os.PowerManager::class.java)
                 if (power != null && !power.isInteractive) lockNow()
+                val onPurpose = Session.leavingOnPurpose()
                 val delay = Session.lockDelayMs(app.enclave.vault.VaultActions.autoLockSeconds() * 1000L)
-                lockDue = android.os.SystemClock.elapsedRealtime() + delay
-                handler.postDelayed(lock, delay)
+                val now = android.os.SystemClock.elapsedRealtime()
+                var due = now + delay
+                // Another app can open the picker and send it away again as often as it likes.
+                // If only the picker was shown since the last deadline was set, for the same
+                // vault, and the user didn't pick anything there, this can't move it later:
+                // otherwise the vault would never auto-lock.
+                val s = Session.current
+                if (s != null && !mainShown && !onPurpose && heldDue != 0L && heldFor?.get() === s) {
+                    due = minOf(due, heldDue)
+                } else {
+                    heldDue = due
+                    heldFor = s?.let { java.lang.ref.WeakReference(it) }
+                }
+                mainShown = false
+                lockDue = due
+                handler.postDelayed(lock, (due - now).coerceAtLeast(0))
             }
         })
 

@@ -104,6 +104,9 @@ class PickActivity : ComponentActivity() {
         val result = Intent().setData(uris[0]).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         result.clipData = ClipData.newRawUri(files[0].name, uris[0]).apply { uris.drop(1).forEach { addItem(ClipData.Item(it)) } }
         setResult(RESULT_OK, result)
+        // Handed to the app that asked: auto-lock waits for a big file it reads from the vault,
+        // as when a file is opened in another app.
+        Session.leaving(Session.Away.HANDOFF)
         finish()
     }
 

@@ -64,6 +64,10 @@ object Session {
         away = null
     }
 
+    /** Whether Enclave is leaving the screen because the user just sent it away (see [leaving]). */
+    fun leavingOnPurpose(): Boolean =
+        away != null && android.os.SystemClock.elapsedRealtime() - awaySince <= AWAY_WINDOW_MS
+
     /**
      * How long after Enclave leaves the screen the vault locks, given the usual delay.
      *
