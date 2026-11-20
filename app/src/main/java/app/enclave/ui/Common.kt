@@ -1,9 +1,12 @@
 package app.enclave.ui
 
+import android.app.Activity
+import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.widget.Toast
+import android.os.Build
+import android.view.View
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -27,7 +30,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,11 +46,77 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.enclave.crypto.Aead
 import app.enclave.crypto.Kdf
+import app.enclave.disguise.Disguise
 import app.enclave.vault.Session
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 
-fun Context.toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+/**
+ * Messages shown inside Enclave's own window by [MessageHost], never as Android toasts: a toast
+ * is drawn outside the window, so screenshots and screen recording catch it, and from Android 12
+ * it carries the app's real icon whatever the disguise.
+ *
+ * Each message belongs to the vault that was unlocked when it was posted (or to the lock screen),
+ * and is dropped unshown if that has changed: one vault's file names never reach another's screen.
+ */
+object Messages {
+    class Message(val text: String, val session: Session.Unlocked?)
+
+    val queue = MutableStateFlow<List<Message>>(emptyList())
+
+    fun post(text: String) {
+        val m = Message(text, Session.current)
+        queue.update { it + m }
+    }
+
+    fun done(m: Message) = queue.update { list -> list.filter { it !== m } }
+}
+
+/** Shows [msg] inside Enclave's window (see [Messages]). Safe to call from any thread. */
+@Suppress("UnusedReceiverParameter")
+fun Context.toast(msg: String) = Messages.post(msg)
+
+/** Shows [Messages] one at a time at the bottom of the screen. Place once per activity. */
+@Composable
+fun MessageHost(modifier: Modifier = Modifier) {
+    val host = remember { SnackbarHostState() }
+    val queue by Messages.queue.collectAsStateWithLifecycle()
+    val unlocked by Session.state.collectAsStateWithLifecycle()
+    val next = queue.firstOrNull()
+    LaunchedEffect(next, unlocked) {
+        if (next == null) return@LaunchedEffect
+        if (next.session === unlocked) {
+            host.showSnackbar(next.text, withDismissAction = true, duration = SnackbarDuration.Long)
+        }
+        Messages.done(next)
+    }
+    SnackbarHost(host, modifier)
+}
+
+/**
+ * What Enclave's activities do to their window, besides blocking screenshots: no autofill service
+ * is offered anything typed or shown in it; from Android 14, accessibility services that aren't
+ * tools for people with disabilities can't read it; and from Android 12, other apps' overlays are
+ * hidden while it's on screen, so nothing can be drawn over the password field or the files.
+ */
+fun Activity.protectWindow() {
+    window.decorView.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
+    if (Build.VERSION.SDK_INT >= 34) window.decorView.setAccessibilityDataSensitive(View.ACCESSIBILITY_DATA_SENSITIVE_YES)
+    if (Build.VERSION.SDK_INT >= 31) window.setHideOverlayWindows(true)
+}
+
+/**
+ * Gives this activity's task the disguise's name and icon, for the recent-apps list. Without it
+ * the system falls back to the app's own label and icon, "Enclave", whatever the disguise.
+ */
+@Suppress("DEPRECATION")
+fun Activity.showDisguise() {
+    val d = Disguise.current()
+    runCatching { setTaskDescription(ActivityManager.TaskDescription(d.label, d.icon)) }
+}
 
 /** Call right before opening a system picker, so auto-lock allows a few minutes to choose. */
 fun leavingOnPurpose() = Session.leaving(Session.Away.PICKER)

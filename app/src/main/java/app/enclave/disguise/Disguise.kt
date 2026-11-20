@@ -9,7 +9,6 @@ import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
 import app.enclave.R
-import app.enclave.ui.MainActivity
 import app.enclave.vault.PlainPrefs
 
 /**
@@ -83,13 +82,18 @@ object Disguise {
 
     fun canPinShortcut(c: Context) = ShortcutManagerCompat.isRequestPinShortcutSupported(c)
 
-    /** A home-screen icon with any name and any picture. The launcher asks the user to confirm. */
+    /**
+     * A home-screen icon with any name and any picture. The launcher asks the user to confirm.
+     * It opens Enclave through the current disguise's entry, not the bare activity (which has no
+     * name or icon of its own, so the system would fill in "Enclave" on the start-up screen). It
+     * stops working if the disguise is changed later, and has to be added again.
+     */
     fun pinCustom(c: Context, name: String, icon: Bitmap): Boolean {
         val info = ShortcutInfoCompat.Builder(c, "custom_${System.currentTimeMillis()}")
             .setShortLabel(name)
             .setLongLabel(name)
             .setIcon(IconCompat.createWithAdaptiveBitmap(icon))
-            .setIntent(Intent(c, MainActivity::class.java).setAction(Intent.ACTION_MAIN))
+            .setIntent(Intent(Intent.ACTION_MAIN).setComponent(ComponentName(c.packageName, current().alias)))
             .build()
         return ShortcutManagerCompat.requestPinShortcut(c, info, null)
     }

@@ -6,9 +6,14 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
@@ -21,6 +26,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.enclave.ui.screens.BusyScreen
 import app.enclave.ui.screens.CalculatorScreen
@@ -37,13 +43,28 @@ class MainActivity : ComponentActivity() {
         // No screenshots, no screen recording, blank preview in the recent-apps list.
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         if (Build.VERSION.SDK_INT >= 33) setRecentsScreenshotEnabled(false)
+        protectWindow()
+        showDisguise()
         enableEdgeToEdge()
         setContent {
             EnclaveTheme {
                 // Surface supplies the readable text colour for every screen.
-                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) { NoKeyboardLearning { Root() } }
+                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    NoKeyboardLearning {
+                        Box(Modifier.fillMaxSize()) {
+                            Root()
+                            MessageHost(Modifier.align(Alignment.BottomCenter).systemBarsPadding().imePadding().padding(bottom = 72.dp))
+                        }
+                    }
+                }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // The disguise may have changed in Settings.
+        showDisguise()
     }
 }
 

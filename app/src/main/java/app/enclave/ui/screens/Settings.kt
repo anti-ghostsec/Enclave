@@ -354,7 +354,7 @@ private fun CustomShortcut() {
     Column(Modifier.padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Custom home-screen icon", style = MaterialTheme.typography.titleSmall)
         Text(
-            "Any name and any picture. It's added as a home-screen shortcut (your launcher will ask to confirm); the app drawer keeps the disguise chosen above.",
+            "Any name and any picture. It's added as a home-screen shortcut (your launcher will ask to confirm); the app drawer keeps the disguise chosen above. If you change the disguise later, add the shortcut again.",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
