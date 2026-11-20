@@ -45,7 +45,10 @@ object VaultActions {
                 } else {
                     // Already done once. Wiping again would write a new header (and make a new
                     // hardware key) at every wrong password, which its file times would show.
-                    // Nothing is left to destroy: take as long as the wipe did, and write nothing.
+                    // Nothing is left to destroy: take as long as the wipe did, and leave the
+                    // header alone. The state is saved again, as the wipe's time was, so the
+                    // whole attempt takes as long as that one did.
+                    PlainPrefs.wipedForFailuresMs = wiped
                     Thread.sleep(wiped.coerceIn(0, MAX_WIPE_WAIT_MS))
                 }
             }
@@ -199,7 +202,12 @@ object VaultActions {
             // The decoy gets its own volume in the containers. The real vault keeps its key, so
             // it can protect the decoy's space and fill it (opened alone, a decoy is read-only).
             ContainerStorage.create(segs, master, migrated = true).close()
-            main.protect(ContainerStorage.volumeKey(master))
+            val volume = ContainerStorage.volumeKey(master)
+            try {
+                main.protect(volume)
+            } finally {
+                volume.fill(0)
+            }
             decoyKey = java.util.Base64.getEncoder().encodeToString(master)
         } else if (role == Role.DECOY) {
             dir = VaultManager.dirFor(master).name
@@ -284,7 +292,14 @@ fun openDecoyForFilling(d: DuressSlot): VaultStore? {
         val cs = ContainerStorage.open(segs, m, readOnly = false) ?: return null
         // Count the real vault's space too, so filling the decoy never writes over it, and do
         // it before the decoy's own tidying up can write.
-        VaultStore(cs, m) { cs.protect(ContainerStorage.volumeKey(s.master)) }
+        VaultStore(cs, m) {
+            val volume = ContainerStorage.volumeKey(s.master)
+            try {
+                cs.protect(volume)
+            } finally {
+                volume.fill(0)
+            }
+        }
     } catch (_: java.io.IOException) {
         // Too damaged to open.
         null

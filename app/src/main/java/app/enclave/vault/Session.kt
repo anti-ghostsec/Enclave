@@ -27,8 +27,11 @@ object Session {
          */
         var sessionPassword: ByteArray? = null
 
-        /** The lock settings a decoy session was asked to set (see [VaultActions.wipeAfterFailures]). */
-        @Volatile var sessionWipeAfter = 0
+        /**
+         * The lock settings a decoy session was asked to set (see [VaultActions.wipeAfterFailures]).
+         * They start as the real ones, so a decoy shows what the real vault would.
+         */
+        @Volatile var sessionWipeAfter = PlainPrefs.wipeAfterFailures
         @Volatile var sessionAutoLock = PlainPrefs.autoLockSeconds
     }
 
