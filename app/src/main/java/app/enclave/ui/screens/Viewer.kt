@@ -3,7 +3,6 @@ package app.enclave.ui.screens
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import android.graphics.drawable.AnimatedImageDrawable
-import android.graphics.drawable.Drawable
 import android.media.MediaPlayer
 import android.view.Surface
 import android.view.TextureView
@@ -76,6 +75,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.enclave.ui.Opener
 import app.enclave.vault.EncryptedMediaSource
@@ -199,6 +200,9 @@ fun ViewerScreen(store: VaultStore, items: List<Entry>, start: Int, onClose: (la
     }
 }
 
+/** An animated image and the decrypted file it plays from, zeroed once it's off the screen. */
+private class Animated(val drawable: AnimatedImageDrawable, val bytes: ByteArray)
+
 /** A still image, or an animated one (GIF / animated WebP) that actually plays. */
 @Composable
 private fun ImagePage(store: VaultStore, e: Entry, active: Boolean, onZoomChange: (Boolean) -> Unit, onTap: () -> Unit) {
@@ -207,8 +211,10 @@ private fun ImagePage(store: VaultStore, e: Entry, active: Boolean, onZoomChange
             runCatching {
                 if (Media.mayAnimate(e) && e.size < 64L * 1024 * 1024) {
                     val bytes = Media.readAll(store, e)
-                    val d = ImageDecoder.decodeDrawable(ImageDecoder.createSource(ByteBuffer.wrap(bytes)))
-                    if (d is AnimatedImageDrawable) return@runCatching d
+                    // An animation keeps decoding frames from these bytes while it plays.
+                    val d = runCatching { ImageDecoder.decodeDrawable(ImageDecoder.createSource(ByteBuffer.wrap(bytes))) }.getOrNull()
+                    if (d is AnimatedImageDrawable) return@runCatching Animated(d, bytes)
+                    bytes.fill(0)
                 }
                 Media.decodeImage(store, e, 2560)
             }.getOrNull() ?: "failed"
@@ -237,13 +243,19 @@ private fun ImagePage(store: VaultStore, e: Entry, active: Boolean, onZoomChange
         when (val l = loaded) {
             null -> CircularProgressIndicator()
             is Bitmap -> Image(l.asImageBitmap(), e.name, zoomable, contentScale = ContentScale.Fit)
-            is Drawable -> {
+            is Animated -> {
                 AndroidView(
                     factory = { ImageView(it).apply { scaleType = ImageView.ScaleType.FIT_CENTER } },
-                    update = { iv -> iv.setImageDrawable(l); (l as? AnimatedImageDrawable)?.start() },
+                    update = { iv -> iv.setImageDrawable(l.drawable); l.drawable.start() },
+                    onRelease = { iv -> iv.setImageDrawable(null) },
                     modifier = zoomable,
                 )
-                DisposableEffect(l) { onDispose { (l as? AnimatedImageDrawable)?.stop() } }
+                DisposableEffect(l) {
+                    onDispose {
+                        l.drawable.stop()
+                        l.bytes.fill(0)
+                    }
+                }
             }
             else -> Text("This image can't be shown here.", color = Color.White)
         }
@@ -305,6 +317,13 @@ private fun PlayerPage(store: VaultStore, e: Entry, active: Boolean, autoPlay: B
         while (playing) {
             position = runCatching { player?.currentPosition ?: 0 }.getOrDefault(0)
             delay(250)
+        }
+    }
+    // Leaving Enclave (for the home screen or another app) pauses it: nothing plays on unseen.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        val mp = player ?: return@LifecycleEventEffect
+        if (runCatching { mp.isPlaying }.getOrDefault(false)) {
+            mp.pause(); setPlaying(false)
         }
     }
 

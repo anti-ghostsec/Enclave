@@ -76,6 +76,7 @@ import app.enclave.ui.PrivateKeyboard
 import app.enclave.ui.SectionTitle
 import app.enclave.ui.leavingOnPurpose
 import app.enclave.ui.toast
+import app.enclave.ui.withChars
 import app.enclave.vault.PlainPrefs
 import app.enclave.vault.Session
 import app.enclave.vault.VaultActions
@@ -258,7 +259,7 @@ private fun ChangePasswordDialog(onDone: () -> Unit) {
                 if (error != null) return@TextButton
                 busy = true
                 scope.launch {
-                    val changed = withContext(Dispatchers.Default) { VaultActions.changePassword(pw.toCharArray(), keyfile.secret) }
+                    val changed = withContext(Dispatchers.Default) { withChars(pw) { VaultActions.changePassword(it, keyfile.secret) } }
                     if (!changed) {
                         busy = false; error = "Choose a different password"
                         return@launch
@@ -307,7 +308,7 @@ private fun AddDuressDialog(onDone: () -> Unit) {
             TextButton(enabled = !busy && pw.length >= 4, onClick = {
                 busy = true; error = null
                 scope.launch {
-                    val added = withContext(Dispatchers.Default) { VaultActions.addDuress(pw.toCharArray(), action, label) }
+                    val added = withContext(Dispatchers.Default) { withChars(pw) { VaultActions.addDuress(it, action, label) } }
                     busy = false
                     when (added) {
                         VaultActions.Added.OK -> { ctx.toast("Duress password added"); onDone() }

@@ -31,6 +31,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import java.text.DateFormat
 import java.util.Date
 import android.graphics.Bitmap
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.activity.compose.BackHandler
@@ -487,7 +488,9 @@ fun FilesScreen(
             text = {
                 Text(
                     "${deleteOriginals.size} file(s) are now encrypted in the vault. The unencrypted originals are still on the phone. " +
-                        "Delete them? (Flash storage can't promise a secure erase, but this removes them from the gallery and file managers.)",
+                        "Delete them?\n\nThis deletes the files themselves, and nothing else: not copies in a cloud backup " +
+                        "(Google Photos, say) or a gallery's trash, and not previews a gallery or the launcher already made. " +
+                        "Remove those yourself. Flash storage can't promise a secure erase either.",
                 )
             },
             confirmButton = {
@@ -499,13 +502,17 @@ fun FilesScreen(
                         // more, now that everything is saved, right before its original goes.
                         var failed = 0
                         var kept = 0
+                        val deleted = mutableListOf<String>()
                         batch.forEachIndexed { i, (original, e) ->
                             checking = i to batch.size
                             val whole = withContext(Dispatchers.IO) { store.verify(e) }
                             if (!whole) kept++
                             else if (!withContext(Dispatchers.IO) { original.delete() }) failed++
+                            else deleted.add(original.path)
                         }
                         checking = null
+                        // Tells the media index the files are gone, so galleries stop listing them.
+                        if (deleted.isNotEmpty()) runCatching { MediaScannerConnection.scanFile(ctx, deleted.toTypedArray(), null, null) }
                         if (kept > 0) ctx.toast("$kept file(s) couldn't be read back from the vault, so their originals were kept. Add them again.")
                         if (failed > 0) ctx.toast("$failed original(s) couldn't be deleted — remove them manually")
                     }

@@ -96,6 +96,16 @@ fun MessageHost(modifier: Modifier = Modifier) {
     SnackbarHost(host, modifier)
 }
 
+/** Hands [block] the characters of [s] in an array that is zeroed as soon as it returns. */
+inline fun <T> withChars(s: String, block: (CharArray) -> T): T {
+    val chars = s.toCharArray()
+    try {
+        return block(chars)
+    } finally {
+        chars.fill('\u0000')
+    }
+}
+
 /**
  * What Enclave's activities do to their window, besides blocking screenshots: no autofill service
  * is offered anything typed or shown in it; from Android 14, accessibility services that aren't

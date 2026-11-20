@@ -238,6 +238,19 @@
             </intent-filter>
         </activity-alias>
 
+        <!-- Compose brings in emoji2, whose start-up code asks Google Play services' font
+             provider for an emoji font, telling it Enclave is running. Emoji then use the
+             phone's own font. The other start-up code (lifecycle) stays. -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+                tools:node="remove" />
+        </provider>
+
         <provider
             android:name=".vault.DecryptedFileProvider"
             android:authorities="${applicationId}.files"

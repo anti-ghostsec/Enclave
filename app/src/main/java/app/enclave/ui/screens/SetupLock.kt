@@ -39,6 +39,7 @@ import app.enclave.disguise.Disguise
 import app.enclave.ui.KeyfileRow
 import app.enclave.ui.KeyfileState
 import app.enclave.ui.PasswordField
+import app.enclave.ui.withChars
 import app.enclave.vault.Session
 import app.enclave.vault.VaultActions
 import app.enclave.vault.VaultManager
@@ -104,7 +105,7 @@ fun SetupScreen() {
                 scope.launch {
                     val usesKeyfile = keyfile.secret != null
                     withContext(Dispatchers.Default) {
-                        Session.open(VaultManager.create(pw.toCharArray(), keyfile.secret))
+                        Session.open(withChars(pw) { VaultManager.create(it, keyfile.secret) })
                     }
                     keyfile.clear()
                     // The new vault opens once its storage is ready.
@@ -147,7 +148,7 @@ fun LockScreen() {
             onClick = {
                 busy = true; error = null
                 scope.launch {
-                    val outcome = withContext(Dispatchers.Default) { VaultActions.unlock(pw.toCharArray(), keyfile.secret) }
+                    val outcome = withContext(Dispatchers.Default) { withChars(pw) { VaultActions.unlock(it, keyfile.secret) } }
                     busy = false
                     when (outcome) {
                         VaultActions.Outcome.Opened -> {

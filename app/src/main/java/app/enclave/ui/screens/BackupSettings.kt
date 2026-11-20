@@ -20,11 +20,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
+import app.enclave.crypto.Aead
 import app.enclave.ui.BrowseMode
 import app.enclave.ui.PasswordField
 import app.enclave.ui.SectionTitle
 import app.enclave.ui.StorageBrowser
 import app.enclave.ui.toast
+import app.enclave.ui.withChars
 import app.enclave.vault.Backup
 import app.enclave.vault.Session
 import kotlinx.coroutines.Dispatchers
@@ -81,10 +83,11 @@ fun BackupSettings(s: Session.Unlocked) {
             onOk = { step = BackupStep.PickFolder(it) },
         )
         is BackupStep.PickFolder -> StorageBrowser(BrowseMode.FOLDER, onDismiss = { step = null }, confirmLabel = "Save backup here") { dirs ->
-            val name = "backup-" + SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date()) + ".bin"
+            // A random name: one like "backup-<date>" would say what the file is, and when.
+            val name = Aead.hex(Aead.random(4)) + ".bin"
             val target = app.enclave.ui.freeName(dirs[0], name)
             run("Creating encrypted backup") { progress ->
-                Backup.create(s.store, st.password.toCharArray(), target, progress)
+                withChars(st.password) { Backup.create(s.store, it, target, progress) }
                 "Backup saved as ${target.name}"
             }
         }
@@ -97,7 +100,7 @@ fun BackupSettings(s: Session.Unlocked) {
                 val folder = "Restored " + SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
                 run("Restoring backup") { progress ->
                     var old = false
-                    val n = Backup.restore(st.file, pw.toCharArray(), s.store, folder, { old = true }, progress)
+                    val n = withChars(pw) { Backup.restore(st.file, it, s.store, folder, { old = true }, progress) }
                     "Restored $n file(s) into “$folder”" + if (old) {
                         "\n\nThis backup was made by an earlier version and also holds the key to the vault " +
                             "it came from. Make a new backup now, then delete this file and any copies of it."

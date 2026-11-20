@@ -243,6 +243,8 @@ object Session {
                 s.sessionPassword?.fill(0); s.sessionPassword = null
             }
         }
+        // Links that read from the vault can't work any more, and expired ones are done.
+        Shares.vaultLocked()
         // A move in progress closes the containers itself once it has stopped.
         if (worker == null) closeSegments()
     }
