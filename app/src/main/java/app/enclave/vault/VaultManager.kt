@@ -128,10 +128,12 @@ object VaultManager {
 
     /**
      * Creates a brand new vault and returns it unlocked. The lock-out state is saved before the
-     * header: once there's a header, a missing state file can only mean it was deleted.
+     * header: once there's a header, a missing state file can only mean it was deleted. If it
+     * can't be saved, nothing is made and this throws: a header without it would be taken for
+     * tampering at the next start.
      */
     fun create(password: CharArray, keyfileSecret: ByteArray?): UnlockResult {
-        PlainPrefs.resetFailures()
+        if (!PlainPrefs.resetFailures()) throw java.io.IOException("couldn't save the lock settings")
         val h = Header(Kdf.DEFAULT, Aead.random(32), Array(Header.SLOT_COUNT) { Header.randomSlot() })
         val slot = slotRng.nextInt(Header.SLOT_COUNT)
         val master = Aead.random(Aead.KEY_BYTES)

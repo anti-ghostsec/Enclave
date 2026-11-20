@@ -67,6 +67,14 @@ open class KeystoreKey(private val alias: String, private val preferStrongBox: B
         runCatching { keyStore().deleteEntry(alias) }
     }
 
+    /** Whether the key exists. Throws if the keystore can't be asked. */
+    fun exists(): Boolean = keyStore().containsAlias(alias)
+
+    /** Makes the key if it doesn't exist yet. */
+    fun ensure() {
+        getOrCreate()
+    }
+
     private companion object {
         const val STORE = "AndroidKeyStore"
     }
@@ -101,14 +109,31 @@ object StateKey {
     /** What [open] found: the contents, and the key that opened them. */
     class Opened(val plain: ByteArray, val alias: String)
 
-    /** Opens [sealed] with whichever state key it was sealed by, or null if none opens it. */
+    /**
+     * Opens [sealed] with whichever state key it was sealed by. Returns null only when there's
+     * positive evidence that no key here sealed it: every state key there is rejected it as not
+     * its own (the authentication tag didn't match), or there is no state key at all, or it's
+     * too short to be sealed by any. Any other failure (the keystore busy or not answering, a
+     * StrongBox or TEE hiccup) is thrown, so the caller can try again later instead of taking
+     * a passing fault for tampering.
+     */
     fun open(sealed: ByteArray): Opened? {
+        if (sealed.size < Aead.NONCE_BYTES + Aead.TAG_BYTES) return null
+        var failure: Exception? = null
         for (alias in aliases()) {
-            val plain = runCatching { KeystoreKey(alias, preferStrongBox = false).open(sealed) }.getOrNull()
-            if (plain != null) return Opened(plain, alias)
+            try {
+                return Opened(KeystoreKey(alias, preferStrongBox = false).open(sealed), alias)
+            } catch (e: Exception) {
+                if (!isRejection(e)) failure = e
+            }
         }
+        failure?.let { throw it }
         return null
     }
+
+    /** Whether [e] says the key isn't the one that sealed the data, and nothing else. */
+    fun isRejection(e: Throwable): Boolean =
+        generateSequence(e) { it.cause }.take(8).any { it is javax.crypto.AEADBadTagException }
 
     /** Seals [plain] with a new key. Returns the sealed bytes and that key's alias. */
     fun sealFresh(plain: ByteArray): Pair<ByteArray, String> {
@@ -133,16 +158,22 @@ object StateKey {
     /** Deletes a key [sealFresh] made whose file never got into place. */
     fun discard(alias: String) = KeystoreKey(alias, preferStrongBox = false).destroy()
 
-    /** Whether the keystore works at all (it can fail for a while right after the phone starts). */
-    fun works(): Boolean {
-        val probe = KeystoreKey(PROBE, preferStrongBox = false)
-        return try {
-            val bytes = byteArrayOf(1, 2, 3)
-            probe.open(probe.seal(bytes)).contentEquals(bytes)
-        } catch (_: Exception) {
-            false
-        } finally {
-            probe.destroy()
-        }
-    }
+    /**
+     * Set while the state file looks tampered with but that hasn't been confirmed on a later
+     * start yet (see PlainPrefs). A key, not a file, so it isn't in the app's files.
+     */
+    val suspect = KeystoreKey("enclave_mark_suspect", preferStrongBox = false)
+
+    /**
+     * Set when the lock-out state was replaced by the strictest one, until the real password is
+     * next typed. Someone who can write Enclave's files but not its keys can't clear it, so a
+     * second replacement leaves no margin at all (see PlainPrefs.distrust).
+     */
+    val distrusted = KeystoreKey("enclave_mark_distrusted", preferStrongBox = false)
+
+    /**
+     * Seals a second, small record of the calculator front and its code (see PlainPrefs). Putting
+     * an older copy of it back only brings back an older code, so it needs no fresh key per save.
+     */
+    val front = KeystoreKey("enclave_front_v1", preferStrongBox = false)
 }

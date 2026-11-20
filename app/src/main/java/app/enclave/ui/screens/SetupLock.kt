@@ -104,8 +104,13 @@ fun SetupScreen() {
                 busy = true
                 scope.launch {
                     val usesKeyfile = keyfile.secret != null
-                    withContext(Dispatchers.Default) {
-                        Session.open(withChars(pw) { VaultManager.create(it, keyfile.secret) })
+                    val made = withContext(Dispatchers.Default) {
+                        runCatching { Session.open(withChars(pw) { VaultManager.create(it, keyfile.secret) }) }.isSuccess
+                    }
+                    if (!made) {
+                        busy = false
+                        error = "No vault was made: Enclave couldn't save its lock settings. The phone's storage may be full. Free some space and try again."
+                        return@launch
                     }
                     keyfile.clear()
                     // The new vault opens once its storage is ready.

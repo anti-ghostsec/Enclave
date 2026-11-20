@@ -19,13 +19,15 @@ import java.io.FileOutputStream
  *
  * Each save is sealed by a new key and the one before is deleted (see [StateKey]), so an older
  * copy of the file put back can't be opened. Neither that nor a missing file is taken as a fresh
- * start while a vault exists: see [distrust].
+ * start while a vault exists: see [StateTrust] and [distrust].
  */
 object PlainPrefs {
     private lateinit var app: Context
     private lateinit var file: File
     /** The vault's header. While it's there, the state file must be too. */
     private lateinit var header: File
+    /** A second record of the calculator front alone, which [distrust] keeps (see [saveFront]). */
+    private lateinit var frontFile: File
     private val values = HashMap<String, String>()
     private val json = Json
 
@@ -33,21 +35,42 @@ object PlainPrefs {
         app = c.applicationContext
         file = File(app.noBackupFilesDir, "state.bin")
         header = File(app.noBackupFilesDir, "header.bin")
+        frontFile = File(app.noBackupFilesDir, "front.bin")
         load()
+        synchronized(this) {
+            if (!unreadable && file.exists()) {
+                // Sealed afresh at every start, so the newest state key and the file's change time
+                // say when Enclave last started, which a password typed or not.
+                persist()
+                if (!frontFile.exists()) saveFront()
+            }
+        }
         moveOldPreferences()
     }
 
     /**
-     * True while the state file is there but the hardware key that opens it isn't answering.
-     * Nothing is saved over the file then (it holds the count of wrong passwords and the wipe
-     * setting), and reading it is tried again each time something is asked for.
+     * True while the state file can't be used yet: the keystore isn't answering, or the file
+     * looks tampered with and that hasn't been confirmed (see [StateTrust]). Nothing is saved
+     * over the file then (it holds the count of wrong passwords and the wipe setting), so no
+     * password can be tried, and reading it is tried again each time something is asked for.
      */
     @Volatile private var unreadable = false
+
+    /** Whether the plain preferences are ones to move over (see [moveOldPreferences]). */
+    @Volatile private var moveOld = false
+
+    /** When this run of the app first suspected the state file; -1 if it hasn't. */
+    private var suspectedAt = -1L
+    /** Whether an earlier run of the app had suspected it already; null until asked. */
+    private var suspectedBefore: Boolean? = null
 
     private fun decode(plain: ByteArray): Map<String, String> =
         json.decodeFromString<Map<String, String>>(String(plain)) - PAD
 
-    /** The state file opened and read, or null if no state key opens it or it doesn't parse. */
+    /**
+     * The state file opened and read; null if every state key rejected it (see [StateKey.open])
+     * or what it holds doesn't parse. Throws for anything that may pass.
+     */
     private fun readFile(): Map<String, String>? {
         val opened = StateKey.open(file.readBytes()) ?: return null
         return try {
@@ -61,63 +84,84 @@ object PlainPrefs {
     @Synchronized
     private fun load() {
         unreadable = false
+        moveOld = false
         val tmp = File(file.path + ".tmp")
         // A save cut off after the old file was deleted and before the new one took its place.
         if (!file.exists() && tmp.exists()) tmp.renameTo(file)
-        if (!file.exists()) {
-            if (!header.exists()) return
-            // Versions before 0.4.0 kept these settings in plain preferences and had no state
-            // key: that is moving up from one of them (see moveOldPreferences), not a deletion.
-            val keys = try {
-                StateKey.hasKeys()
-            } catch (_: Exception) {
-                unreadable = true
-                return
-            }
-            if (keys || !hasOldPreferences()) distrust()
-            return
-        }
-        val saved = try {
-            readFile()
+        var saved: Map<String, String>? = null
+        val found = if (!file.exists()) StateTrust.Found.MISSING else try {
+            saved = readFile()
+            if (saved != null) StateTrust.Found.OPENED else StateTrust.Found.REJECTED
         } catch (_: Exception) {
-            // The file or the keystore couldn't be read at all: try again later.
-            unreadable = true
-            return
+            StateTrust.Found.ERROR
         }
-        if (saved != null) {
-            values.clear()
-            values += saved
-            return
+        val vault = header.exists()
+        val keys = if (found == StateTrust.Found.MISSING && vault) runCatching { StateKey.hasKeys() }.getOrNull() else null
+        val old = found == StateTrust.Found.MISSING && vault && keys == false && hasOldPreferences()
+        val suspicious = vault && !old &&
+            (found == StateTrust.Found.REJECTED || (found == StateTrust.Found.MISSING && keys != null))
+        if (suspicious && suspectedAt < 0) {
+            // Asked before the mark is set, so it says whether an earlier run set it.
+            if (suspectedBefore == null) suspectedBefore = runCatching { StateKey.suspect.exists() }.getOrDefault(false)
+            suspectedAt = SystemClock.elapsedRealtime()
+            runCatching { StateKey.suspect.ensure() }
         }
-        // Nothing opens it. If the keystore doesn't work at all (it can fail right after the
-        // phone starts), keep the file and try again later.
-        if (!StateKey.works()) {
-            unreadable = true
-            return
+        val action = StateTrust.decide(
+            found, vault, keys, old,
+            suspectedBefore = suspectedBefore == true,
+            suspectedForMs = if (suspectedAt < 0) -1 else SystemClock.elapsedRealtime() - suspectedAt,
+        )
+        when (action) {
+            StateTrust.Action.USE -> {
+                values.clear()
+                values += saved!!
+                clearSuspicion()
+            }
+            StateTrust.Action.START_EMPTY -> {
+                values.clear()
+                clearSuspicion()
+                // With no vault there's nothing to protect, so old settings may come over too.
+                moveOld = found == StateTrust.Found.MISSING && hasOldPreferences()
+            }
+            StateTrust.Action.MOVE_OLD -> moveOld = true
+            StateTrust.Action.RETRY, StateTrust.Action.SUSPECT -> unreadable = true
+            StateTrust.Action.DISTRUST -> {
+                distrust()
+                clearSuspicion()
+            }
         }
-        // The keystore works, so the file is damaged or is an older copy put back (whose key was
-        // deleted at the next save). With no vault there's nothing to protect: start afresh.
-        values.clear()
-        if (header.exists()) distrust()
     }
 
-    /** The wipe setting [distrust] puts in place; the count of wrong passwords starts one below it. */
+    private fun clearSuspicion() {
+        StateKey.suspect.destroy()
+        suspectedAt = -1
+        suspectedBefore = null
+    }
+
+    /** The wipe setting [distrust] puts in place. */
     private const val DISTRUST_WIPE_AFTER = 20
 
     /**
-     * A vault exists but the state that counts its wrong passwords is missing or can't be opened.
-     * That only happens if the file was deleted, damaged or swapped for an older copy, which is
-     * how someone able to write Enclave's files would undo the count to keep guessing. So assume
-     * the worst: the longest lock-out starts now, and the next wrong password wipes the vault. A
-     * copy of this state put back later doesn't open either, and starts this over.
+     * A vault exists but the state that counts its wrong passwords is missing or no state key
+     * opens it, and that was seen again after a while (see [StateTrust]). That only happens if
+     * the file was deleted, damaged or swapped for an older copy, which is how someone able to
+     * write Enclave's files would undo the count to keep guessing. So assume the worst: the
+     * longest lock-out starts now, and the third wrong password wipes the vault; if this has
+     * happened before without the real password typed since, the next one does. A copy of this
+     * state put back later doesn't open either, and starts this over.
      *
      * The other settings in it can't be known. The disguise is read back from the app's own
-     * launcher entry; the calculator front and its code are lost and have to be set again. The
-     * real vault says what happened when it's next opened (see [wasDistrusted]).
+     * launcher entry, and the calculator front and its code from their own record ([saveFront]);
+     * the rest go back to their defaults. The real vault says what happened when it's next
+     * opened (see [wasDistrusted]).
      */
     private fun distrust() {
+        // If the mark can't be read or set, take it as set: the stricter count.
+        val before = runCatching { StateKey.distrusted.exists() }.getOrDefault(true)
+        runCatching { StateKey.distrusted.ensure() }
+        val front = runCatching { readFront() }.getOrNull()
         values.clear()
-        values["failed"] = (DISTRUST_WIPE_AFTER - 1).toString()
+        values["failed"] = StateTrust.distrustCount(DISTRUST_WIPE_AFTER, before).toString()
         values["failed_at"] = System.currentTimeMillis().toString()
         values["failed_since_boot"] = SystemClock.elapsedRealtime().toString()
         values["failed_boot"] = bootCount().toString()
@@ -126,6 +170,7 @@ object PlainPrefs {
         // A vault that may be in the containers must not be made again in its place.
         if (File(app.noBackupFilesDir, "store").list()?.isNotEmpty() == true) values["main_in_containers"] = "true"
         launcherDisguise()?.let { values["disguise"] = it }
+        front?.forEach { (k, v) -> if (k in FRONT_KEYS) values[k] = v }
         persist()
     }
 
@@ -145,12 +190,73 @@ object PlainPrefs {
      */
     val wasDistrusted get() = get("distrusted") == "true"
 
-    fun clearDistrusted() = set("distrusted", null)
+    fun clearDistrusted() {
+        set("distrusted", null)
+    }
 
     const val DISTRUSTED_MESSAGE =
         "Enclave's lock settings were missing or couldn't be opened, so the strictest were put in their place: " +
-            "wipe after 20 wrong passwords, and the calculator front off. That happens if their file was deleted, " +
+            "wipe after 20 wrong passwords, a long wait before the next try, and auto-lock at once. The calculator " +
+            "front and its code were kept if they could be read back. That happens if their file was deleted, " +
             "damaged or replaced with an older copy. Check them in Settings."
+
+    // ---- The calculator front's own record ------------------------------------------------
+
+    /** What the calculator front's record holds. */
+    private val FRONT_KEYS = setOf("calc_facade", "calc_salt", "calc_kdf", "calc_hash")
+
+    /** The record as last read, for while the state file can't be. */
+    @Volatile private var frontCache: Map<String, String>? = null
+
+    /**
+     * Saves the calculator front and its code on their own, sealed by a fixed key. [distrust]
+     * can't know them from the state file, and without them a calculator icon would open on a
+     * password screen, which gives the front away. An older copy put back brings back an older
+     * code and nothing else, so this record needs none of the state file's protection against
+     * that. It's filled to the same size whatever it holds.
+     */
+    @Synchronized
+    private fun saveFront() {
+        if (unreadable) return
+        val record = values.filterKeys { it in FRONT_KEYS }
+        val plain = paddedJson(record).toByteArray()
+        runCatching {
+            val sealed = try {
+                StateKey.front.seal(plain)
+            } finally {
+                plain.fill(0)
+            }
+            val tmp = File(frontFile.path + ".tmp")
+            FileOutputStream(tmp).use { it.write(sealed); it.fd.sync() }
+            if (!tmp.renameTo(frontFile)) {
+                frontFile.delete()
+                tmp.renameTo(frontFile)
+            }
+            frontFile.setLastModified(VaultStore.FIXED_TIME)
+            frontCache = record
+        }
+    }
+
+    /** The calculator front's record; null if there's none. Throws if it can't be read. */
+    private fun readFront(): Map<String, String>? {
+        if (!frontFile.exists()) return null
+        val plain = StateKey.front.open(frontFile.readBytes())
+        return try {
+            decode(plain).filterKeys { it in FRONT_KEYS }.also { frontCache = it }
+        } finally {
+            plain.fill(0)
+        }
+    }
+
+    /**
+     * A setting of the calculator front. While the state file can't be used, its own record
+     * stands in, so a calculator icon still opens on the calculator.
+     */
+    private fun front(k: String): String? = synchronized(this) {
+        if (unreadable) load()
+        if (!unreadable) return values[k]
+        (frontCache ?: runCatching { readFront() }.getOrNull())?.get(k)
+    }
 
     private const val PAD = "_pad"
     private const val STATE_BLOCK = 2048
@@ -162,21 +268,41 @@ object PlainPrefs {
         return json.encodeToString(state + (PAD to "x".repeat(target - bare)))
     }
 
-    private fun hasOldPreferences() = app.getSharedPreferences("enclave", Context.MODE_PRIVATE).all.isNotEmpty()
+    private fun oldPreferences() = app.getSharedPreferences("enclave", Context.MODE_PRIVATE)
 
-    /** Earlier versions kept these in plain Android preferences: seal them, then delete those. */
+    /** Whether plain preferences are there that a version before 0.4.0 could have written. */
+    private fun hasOldPreferences() = StateTrust.looksOld(oldPreferences().all.keys)
+
+    /**
+     * Versions before 0.4.0 kept these settings in plain Android preferences: seal them, then
+     * delete those. Only when [load] found that's what this is (no state file, no state key, and
+     * nothing in the preferences a later version would have written). Preferences found at any
+     * other time weren't written by Enclave, and are deleted unread: otherwise a file planted
+     * there could add settings the sealed state doesn't have, a record of a wipe that never ran
+     * among them.
+     */
     private fun moveOldPreferences() {
-        val old = app.getSharedPreferences("enclave", Context.MODE_PRIVATE)
+        val old = oldPreferences()
         val all = old.all
         if (all.isEmpty()) return
-        all.forEach { (k, v) -> if (v != null && k !in values) values[k] = v.toString() }
+        if (!moveOld) {
+            if (!unreadable) deleteOldPreferences()
+            return
+        }
+        synchronized(this) {
+            all.forEach { (k, v) -> if (v != null && k in StateTrust.OLD_PREFERENCE_KEYS && k !in values) values[k] = v.toString() }
+        }
         if (!persist()) return
+        moveOld = false
+        saveFront()
         // Only once the sealed copy reads back correctly does the plain one go.
         val check = runCatching { synchronized(this) { readFile() } }.getOrNull()
-        if (check == values) {
-            old.edit().clear().commit()
-            app.deleteSharedPreferences("enclave")
-        }
+        if (check == synchronized(this) { values.toMap() }) deleteOldPreferences()
+    }
+
+    private fun deleteOldPreferences() {
+        oldPreferences().edit().clear().commit()
+        app.deleteSharedPreferences("enclave")
     }
 
     /**
@@ -219,12 +345,12 @@ object PlainPrefs {
         values[k]
     }
 
-    private fun set(k: String, v: String?) {
+    private fun set(k: String, v: String?): Boolean {
         synchronized(this) {
             if (unreadable) load()
             if (v == null) values.remove(k) else values[k] = v
         }
-        persist()
+        return persist().also { if (it && k in FRONT_KEYS) saveFront() }
     }
 
     /**
@@ -235,13 +361,14 @@ object PlainPrefs {
         get() = get("main_in_containers").toBoolean()
         set(v) { if (v != mainInContainers) set("main_in_containers", if (v) "true" else null) }
 
+    /** While the state file can't be used, the launcher entry that is on says which it is. */
     var disguise: String
-        get() = get("disguise") ?: "Default"
-        set(v) = set("disguise", v)
+        get() = get("disguise") ?: (if (unreadable) launcherDisguise() else null) ?: "Default"
+        set(v) { set("disguise", v) }
 
     var calculatorFacade: Boolean
-        get() = get("calc_facade").toBoolean()
-        set(v) = set("calc_facade", v.toString())
+        get() = front("calc_facade").toBoolean()
+        set(v) { set("calc_facade", v.toString()) }
 
     /** Light Argon2id: checked on every "=", but still far slower to guess than a plain hash. */
     private val CODE_KDF = Kdf.Params(memoryKiB = 16 * 1024, iterations = 2, parallelism = 1)
@@ -255,41 +382,44 @@ object PlainPrefs {
             values["calc_kdf"] = codeHash(code, salt)
             values.remove("calc_hash")
         }
-        persist()
+        if (persist()) saveFront()
     }
 
     fun checkCalculatorCode(code: String): Boolean {
-        val salt = get("calc_salt")?.let { s -> s.chunked(2).map { it.toInt(16).toByte() }.toByteArray() } ?: return false
-        get("calc_kdf")?.let { return java.security.MessageDigest.isEqual(codeHash(code, salt).toByteArray(), it.toByteArray()) }
+        val salt = front("calc_salt")?.let { s -> s.chunked(2).map { it.toInt(16).toByte() }.toByteArray() } ?: return false
+        front("calc_kdf")?.let { return java.security.MessageDigest.isEqual(codeHash(code, salt).toByteArray(), it.toByteArray()) }
         // A code set by an earlier version (single SHA-256): accept it once, then upgrade it.
-        val old = get("calc_hash") ?: return false
+        val old = front("calc_hash") ?: return false
         val ok = java.security.MessageDigest.isEqual(Aead.hex(Aead.sha256(salt, code.toByteArray())).toByteArray(), old.toByteArray())
         if (ok) setCalculatorCode(code)
         return ok
     }
 
-    val hasCalculatorCode get() = get("calc_kdf") != null || get("calc_hash") != null
+    val hasCalculatorCode get() = front("calc_kdf") != null || front("calc_hash") != null
 
     /** Seconds in the background before auto-lock. 0 = immediately. */
     var autoLockSeconds: Int
         get() = get("auto_lock")?.toIntOrNull() ?: 0
-        set(v) = set("auto_lock", v.toString())
+        set(v) { set("auto_lock", v.toString()) }
 
     /** Wipe everything after this many wrong passwords in a row. 0 = never. */
     var wipeAfterFailures: Int
         get() = get("wipe_after")?.toIntOrNull() ?: 0
-        set(v) = set("wipe_after", v.toString())
+        set(v) { set("wipe_after", v.toString()) }
 
     val failedAttempts: Int get() = get("failed")?.toIntOrNull() ?: 0
 
-    /** Clears the count of wrong passwords, and with it the record of a wipe for them. */
-    fun resetFailures() {
+    /**
+     * Clears the count of wrong passwords, and with it the record of a wipe for them and the mark
+     * that the state was replaced (see [distrust]). Returns false if that couldn't be saved.
+     */
+    fun resetFailures(): Boolean {
         synchronized(this) {
             if (unreadable) load()
             values["failed"] = "0"
             values.remove("wiped_ms")
         }
-        persist()
+        return persist().also { if (it) StateKey.distrusted.destroy() }
     }
 
     /**
@@ -298,7 +428,7 @@ object PlainPrefs {
      */
     var wipedForFailuresMs: Long?
         get() = get("wiped_ms")?.toLongOrNull()
-        set(v) = set("wiped_ms", v?.toString())
+        set(v) { set("wiped_ms", v?.toString()) }
 
     private fun bootCount(): Int = runCatching { Settings.Global.getInt(app.contentResolver, Settings.Global.BOOT_COUNT) }.getOrDefault(-1)
 

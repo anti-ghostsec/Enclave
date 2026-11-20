@@ -62,7 +62,15 @@ object VaultActions {
                 // the same password so the person watching just sees an empty vault.
                 Aead.wipe(r.master)
                 wipeEverything()
-                Session.open(VaultManager.create(password, null))
+                val fresh = try {
+                    VaultManager.create(password, null)
+                } catch (_: Exception) {
+                    // The lock settings couldn't be saved, so no vault can be made. Everything is
+                    // destroyed already: leave the lock screen as it was, every password wrong.
+                    VaultManager.createUnopenable()
+                    return Outcome.Wrong
+                }
+                Session.open(fresh)
             }
         }
         // The lock settings were replaced by the strictest ones (see PlainPrefs.distrust): the
