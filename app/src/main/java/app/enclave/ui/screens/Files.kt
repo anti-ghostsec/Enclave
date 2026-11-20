@@ -92,6 +92,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -126,7 +127,6 @@ import kotlinx.coroutines.withContext
 /** Set when another app asked to pick a file from Enclave (e.g. a website's upload button). */
 class PickRequest(val allowMultiple: Boolean, val onPick: (List<Entry>) -> Unit)
 
-@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun FilesScreen(
     store: VaultStore,
@@ -136,6 +136,20 @@ fun FilesScreen(
     active: Boolean = true,
     /** A file to scroll into view, e.g. the last one shown in the viewer. */
     focus: String? = null,
+) {
+    // Everything it remembers (the open folder, a search, a selection, a file being renamed)
+    // belongs to this vault's store, and starts afresh for any other.
+    key(store) { FilesContent(store, onView, pick, active, focus) }
+}
+
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@Composable
+private fun FilesContent(
+    store: VaultStore,
+    onView: (List<Entry>, Int) -> Unit,
+    pick: PickRequest?,
+    active: Boolean,
+    focus: String?,
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()

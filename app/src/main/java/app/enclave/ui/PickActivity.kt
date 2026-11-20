@@ -16,6 +16,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -67,19 +68,24 @@ class PickActivity : ComponentActivity() {
                     if (s == null) {
                         if (PlainPrefs.calculatorFacade && !facadePassed) CalculatorScreen(onSecret = { facadePassed = true })
                         else LockScreen()
-                    } else Box(Modifier.fillMaxSize()) {
-                        ShareHost(s.store)
-                        Box(Modifier.systemBarsPadding()) {
-                            FilesScreen(
-                                s.store,
-                                onView = { items, i -> viewing = items to i },
-                                pick = PickRequest(multiple) { picked -> deliver(picked) },
-                                active = viewing == null,
-                                focus = focus,
-                            )
-                        }
-                        viewing?.let { (items, start) ->
-                            ViewerScreen(s.store, items, start, onClose = { last -> focus = last?.id; viewing = null })
+                    } else key(s) {
+                        // Keyed by the session, like the main screen: the lock in between can be
+                        // missed while this screen is stopped, and nothing remembered for one vault
+                        // (the open folder, a search) may be shown for the next.
+                        Box(Modifier.fillMaxSize()) {
+                            ShareHost(s.store)
+                            Box(Modifier.systemBarsPadding()) {
+                                FilesScreen(
+                                    s.store,
+                                    onView = { items, i -> viewing = items to i },
+                                    pick = PickRequest(multiple) { picked -> deliver(picked) },
+                                    active = viewing == null,
+                                    focus = focus,
+                                )
+                            }
+                            viewing?.let { (items, start) ->
+                                ViewerScreen(s.store, items, start, onClose = { last -> focus = last?.id; viewing = null })
+                            }
                         }
                     }
                     Box(Modifier.fillMaxSize()) {
