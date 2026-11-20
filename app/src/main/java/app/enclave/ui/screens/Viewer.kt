@@ -207,17 +207,27 @@ private class Animated(val drawable: AnimatedImageDrawable, val bytes: ByteArray
 @Composable
 private fun ImagePage(store: VaultStore, e: Entry, active: Boolean, onZoomChange: (Boolean) -> Unit, onTap: () -> Unit) {
     val loaded by produceState<Any?>(null, e.id) {
-        value = withContext(Dispatchers.IO) {
-            runCatching {
-                if (Media.mayAnimate(e) && e.size < 64L * 1024 * 1024) {
-                    val bytes = Media.readAll(store, e)
-                    // An animation keeps decoding frames from these bytes while it plays.
-                    val d = runCatching { ImageDecoder.decodeDrawable(ImageDecoder.createSource(ByteBuffer.wrap(bytes))) }.getOrNull()
-                    if (d is AnimatedImageDrawable) return@runCatching Animated(d, bytes)
-                    bytes.fill(0)
-                }
-                Media.decodeImage(store, e, 2560)
-            }.getOrNull() ?: "failed"
+        var made: Any? = null
+        try {
+            value = withContext(Dispatchers.IO) {
+                runCatching {
+                    if (Media.mayAnimate(e) && e.size < 64L * 1024 * 1024) {
+                        val bytes = Media.readAll(store, e)
+                        // An animation keeps decoding frames from these bytes while it plays.
+                        val d = runCatching { ImageDecoder.decodeDrawable(ImageDecoder.createSource(ByteBuffer.wrap(bytes))) }.getOrNull()
+                        if (d is AnimatedImageDrawable) return@runCatching Animated(d, bytes)
+                        bytes.fill(0)
+                    }
+                    Media.decodeImage(store, e, 2560)
+                }.getOrNull().also { made = it } ?: "failed"
+            }
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            // The page left before the picture was shown, so nothing else will clear it.
+            when (val m = made) {
+                is Animated -> m.bytes.fill(0)
+                is Bitmap -> Media.clear(m)
+            }
+            throw c
         }
     }
     var scale by remember { mutableFloatStateOf(1f) }
@@ -242,7 +252,10 @@ private fun ImagePage(store: VaultStore, e: Entry, active: Boolean, onZoomChange
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         when (val l = loaded) {
             null -> CircularProgressIndicator()
-            is Bitmap -> Image(l.asImageBitmap(), e.name, zoomable, contentScale = ContentScale.Fit)
+            is Bitmap -> {
+                Image(l.asImageBitmap(), e.name, zoomable, contentScale = ContentScale.Fit)
+                DisposableEffect(l) { onDispose { Media.clear(l) } }
+            }
             is Animated -> {
                 AndroidView(
                     factory = { ImageView(it).apply { scaleType = ImageView.ScaleType.FIT_CENTER } },

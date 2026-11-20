@@ -383,6 +383,11 @@ class VaultStore(
     private fun thumbName(id: String) = "$id.t"
     private val thumbs = object : LruCache<String, Bitmap>(24 * 1024 * 1024) {
         override fun sizeOf(k: String, v: Bitmap) = v.byteCount
+
+        // Evicted (or dropped at the lock), not replaced: a replaced one may still be on screen.
+        override fun entryRemoved(evicted: Boolean, k: String, old: Bitmap, new: Bitmap?) {
+            if (evicted) Media.clear(old)
+        }
     }
 
     /**
@@ -443,7 +448,8 @@ class VaultStore(
             if (state == THUMB_NONE) return null
             if (state != null && state > 0) {
                 val jpg = readThumbJpg(e.id, key) ?: return null
-                return BitmapFactory.decodeByteArray(jpg, 0, jpg.size).also { jpg.fill(0); it?.let { b -> thumbs.put(e.id, b) } }
+                val mutable = BitmapFactory.Options().apply { inMutable = true }
+                return BitmapFactory.decodeByteArray(jpg, 0, jpg.size, mutable).also { jpg.fill(0); it?.let { b -> thumbs.put(e.id, b) } }
             }
             if (closed) return null
             val bmp = runCatching { Media.makeThumbnail(this, e) }.getOrNull()

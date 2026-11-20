@@ -38,9 +38,25 @@ object Media {
     /** Opens inside Enclave's own viewer rather than another app. */
     fun isViewable(e: Entry) = isImage(e) || isVideo(e) || isAudio(e) || isText(e)
 
+    /**
+     * Blanks a decoded picture of a vault file that's no longer needed, if it can be changed.
+     * Its pixels would otherwise stay in memory until the space is used again.
+     */
+    fun clear(b: Bitmap) {
+        if (b.isMutable && !b.isRecycled) runCatching { b.eraseColor(0) }
+    }
+
     /** Reads a whole file into memory (for small media such as GIFs). Caller should wipe it. */
-    fun readAll(store: VaultStore, e: Entry): ByteArray =
-        store.reader(e).use { r -> ByteArray(r.size.toInt()).also { r.read(0, it, 0, it.size) } }
+    fun readAll(store: VaultStore, e: Entry): ByteArray = store.reader(e).use { r ->
+        val bytes = ByteArray(r.size.toInt())
+        try {
+            r.read(0, bytes, 0, bytes.size)
+        } catch (t: Throwable) {
+            bytes.fill(0)
+            throw t
+        }
+        bytes
+    }
 
     /**
      * Decodes an image, honouring its EXIF rotation, scaled so its longest side is about [maxSide].
@@ -54,6 +70,8 @@ object Media {
                     val longest = maxOf(info.size.width, info.size.height)
                     if (longest > maxSide) dec.setTargetSampleSize(longest / maxSide)
                     dec.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    // So whoever is done with it can clear it (see [clear]).
+                    dec.isMutableRequired = true
                 }
             } catch (_: Exception) {
                 // Fall through to BitmapFactory for formats ImageDecoder rejects.
@@ -66,7 +84,7 @@ object Media {
         var sample = 1
         while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= maxSide) sample *= 2
         return store.reader(e).use {
-            BitmapFactory.decodeStream(it.inputStream(), null, BitmapFactory.Options().apply { inSampleSize = sample })
+            BitmapFactory.decodeStream(it.inputStream(), null, BitmapFactory.Options().apply { inSampleSize = sample; inMutable = true })
         }
     }
 
@@ -93,7 +111,9 @@ object Media {
     }
 
     fun makeThumbnail(store: VaultStore, e: Entry): Bitmap? = when {
-        isImage(e) -> decodeImage(store, e, THUMB * 2)?.let { ThumbnailUtils.extractThumbnail(it, THUMB, THUMB) }
+        isImage(e) -> decodeImage(store, e, THUMB * 2)?.let { big ->
+            ThumbnailUtils.extractThumbnail(big, THUMB, THUMB).also { if (it !== big) clear(big) }
+        }
         isVideo(e) -> MediaMetadataRetriever().run {
             try {
                 setDataSource(EncryptedMediaSource(store.reader(e)))
