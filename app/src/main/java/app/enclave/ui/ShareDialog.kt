@@ -41,11 +41,14 @@ private fun isOutside(r: ResolveInfo) = r.activityInfo.packageName == SECURE_FOL
 private fun labelOf(r: ResolveInfo, pm: android.content.pm.PackageManager) =
     if (isOutside(r)) "Outside Secure Folder" else r.loadLabel(pm).toString()
 
-/** Shows the share prompt whenever something asks to share. Place once per screen. */
+/**
+ * Shows the share prompt whenever something asks to share from [store]. Place once per screen.
+ * The request belongs to that vault: it's gone once it locks, and no other vault sees it.
+ */
 @Composable
 fun ShareHost(store: VaultStore) {
-    val files by Opener.pendingShare.collectAsStateWithLifecycle()
-    files?.let { ShareDialog(store, it, onDone = { Opener.pendingShare.value = null }) }
+    val files by store.pendingShare.collectAsStateWithLifecycle()
+    files?.let { ShareDialog(store, it, onDone = { store.pendingShare.value = null }) }
 }
 
 /**

@@ -15,6 +15,7 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -69,7 +70,8 @@ private fun Root() {
     val u = unlocked
     val b = busy
     when {
-        u != null -> HomeScreen(u)
+        // Keyed by the session, so nothing remembered for one vault survives into the next.
+        u != null -> key(u) { HomeScreen(u) }
         b != null -> BusyScreen(b)
         !exists -> SetupScreen()
         PlainPrefs.calculatorFacade && !facadePassed -> CalculatorScreen(onSecret = { facadePassed = true })

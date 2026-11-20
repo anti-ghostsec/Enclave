@@ -111,6 +111,13 @@ class VaultStore(
     /** The last thing that couldn't be saved, for the UI to show once. */
     val problem = MutableStateFlow<String?>(null)
 
+    /**
+     * Files waiting for the user to choose where to send them (see Opener.share). Kept with this
+     * vault and cleared when it closes, so a vault unlocked later, a decoy above all, never shows
+     * a share dialog with this one's file names.
+     */
+    val pendingShare = MutableStateFlow<List<Entry>?>(null)
+
     val isOpen get() = !closed
 
     /** SHA-256 of what each file imported in this session held when it was read, by id. */
@@ -569,6 +576,8 @@ class VaultStore(
         importedHashes.clear()
         thumbs.evictAll()
         _entries.value = emptyList()
+        pendingShare.value = null
+        problem.value = null
     }
 
     companion object {

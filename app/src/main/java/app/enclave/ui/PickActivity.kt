@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -50,15 +51,20 @@ class PickActivity : ComponentActivity() {
             EnclaveTheme {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) { NoKeyboardLearning {
                     val unlocked by Session.state.collectAsStateWithLifecycle()
-                    var viewing by remember { mutableStateOf<Pair<List<Entry>, Int>?>(null) }
                     val s = unlocked
-                    var focus by remember { mutableStateOf<String?>(null) }
-                    // With the calculator front on, it stands in front of the password here too.
+                    // Remembered per unlocked vault: after a lock, the file that was open (and
+                    // its name) must not be there for whichever vault is unlocked next.
+                    var viewing by remember(s) { mutableStateOf<Pair<List<Entry>, Int>?>(null) }
+                    var focus by remember(s) { mutableStateOf<String?>(null) }
+                    // With the calculator front on, it stands in front of the password here too,
+                    // again after every lock.
                     var facadePassed by remember { mutableStateOf(false) }
+                    LaunchedEffect(s) { if (s == null) facadePassed = false }
                     if (s == null) {
                         if (PlainPrefs.calculatorFacade && !facadePassed) CalculatorScreen(onSecret = { facadePassed = true })
                         else LockScreen()
                     } else Box(Modifier.fillMaxSize()) {
+                        ShareHost(s.store)
                         Box(Modifier.systemBarsPadding()) {
                             FilesScreen(
                                 s.store,

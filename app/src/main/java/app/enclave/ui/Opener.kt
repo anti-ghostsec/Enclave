@@ -11,7 +11,6 @@ import app.enclave.vault.Media
 import app.enclave.vault.Shares
 import app.enclave.vault.VaultSettings
 import app.enclave.vault.VaultStore
-import kotlinx.coroutines.flow.MutableStateFlow
 
 /** Hands vault files to other apps: "Open with", default apps, and the share sheet. */
 object Opener {
@@ -52,16 +51,14 @@ object Opener {
     }
 
     /**
-     * Files waiting for the user to choose where to send them. Enclave shows its own list of apps
-     * (see ShareDialog) instead of Android's share sheet, which mixes in contacts and recent chats
-     * that are far too easy to tap by mistake.
+     * Asks where to send [entries]. Enclave shows its own list of apps (see ShareDialog) instead
+     * of Android's share sheet, which mixes in contacts and recent chats that are far too easy to
+     * tap by mistake. The request waits in [VaultStore.pendingShare], so it ends with that vault.
      */
-    val pendingShare = MutableStateFlow<List<Entry>?>(null)
-
     fun share(ctx: Context, store: VaultStore, entries: List<Entry>) {
         val files = entries.filter { !it.folder }
         if (files.isEmpty()) return ctx.toast("Choose files, not folders, to share")
-        pendingShare.value = files
+        store.pendingShare.value = files
     }
 
     /** The intent apps receive, without a target yet. Used both to list apps and to send. */
