@@ -42,15 +42,28 @@ class DecryptedFileProvider : ContentProvider() {
         if (mode != "r") throw SecurityException("read only")
         val sh = share(uri)
         val reader = ChunkedCipher.Reader(sh.open(), sh.key, sh.size)
+        // Closed (its copy of the key zeroed) when the share ends, even while the other app
+        // still holds the file open.
+        if (!Shares.attach(uri, sh, reader)) throw FileNotFoundException("expired")
         val sm = context!!.getSystemService(StorageManager::class.java)
-        return sm.openProxyFileDescriptor(ParcelFileDescriptor.MODE_READ_ONLY, object : ProxyFileDescriptorCallback() {
-            override fun onGetSize() = reader.size
-            override fun onRead(offset: Long, size: Int, data: ByteArray): Int {
-                if (!Shares.isLive(uri)) throw ErrnoException("read", OsConstants.EACCES)
-                return reader.read(offset, data, 0, size).coerceAtLeast(0)
-            }
-            override fun onRelease() = reader.close()
-        }, Handler(thread.looper))
+        return try {
+            sm.openProxyFileDescriptor(ParcelFileDescriptor.MODE_READ_ONLY, object : ProxyFileDescriptorCallback() {
+                override fun onGetSize() = reader.size
+                override fun onRead(offset: Long, size: Int, data: ByteArray): Int {
+                    if (!Shares.isLive(uri)) throw ErrnoException("read", OsConstants.EACCES)
+                    return try {
+                        reader.read(offset, data, 0, size).coerceAtLeast(0)
+                    } catch (_: Exception) {
+                        // Closed by the share's end mid-read, or the file couldn't be read.
+                        throw ErrnoException("read", OsConstants.EIO)
+                    }
+                }
+                override fun onRelease() = Shares.detach(sh, reader)
+            }, Handler(thread.looper))
+        } catch (t: Throwable) {
+            Shares.detach(sh, reader)
+            throw t
+        }
     }
 
     override fun insert(uri: Uri, values: ContentValues?): Uri? = null

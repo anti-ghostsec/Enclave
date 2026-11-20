@@ -94,6 +94,12 @@ class VaultStore(
     constructor(dir: File, master: ByteArray) : this(DirStorage(dir), master)
 
     private val indexKey = Aead.subkey(master, "index")
+
+    /**
+     * The same for every unlock of this vault and different for every other, so the links handed
+     * out from it can be ended when another vault is unlocked (see [Shares.vaultOpened]).
+     */
+    val shareOwner: ByteArray = Aead.sha256(master, "share owner".toByteArray())
     private val settingsKey = Aead.subkey(master, "settings")
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -638,7 +644,7 @@ class VaultStore(
         if (closed) return
         runCatching { storage.close() }
         closed = true
-        indexKey.fill(0); settingsKey.fill(0)
+        indexKey.fill(0); settingsKey.fill(0); shareOwner.fill(0)
         importedHashes.values.forEach { it.fill(0) }
         importedHashes.clear()
         fileKeys.values.forEach { it.fill(0) }

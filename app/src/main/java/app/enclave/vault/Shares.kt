@@ -12,7 +12,9 @@ import java.util.concurrent.ConcurrentHashMap
  * Each share holds only that one file's key, so it keeps working after Enclave auto-locks (the
  * player can keep playing, the browser can finish uploading) without keeping the vault itself
  * open. Shares end when the screen turns off, after [LIFETIME_MS], or with [clear]. Ones that read
- * from the open vault also end when it locks.
+ * from the open vault also end when it locks, and all of one vault's end as soon as a different
+ * vault is unlocked (a decoy above all): a link from the real vault must not still work then. When
+ * a share ends, its key is zeroed and every reader open on it is closed, zeroing their copies.
  *
  * A link is content://<package>.files/<random token>/file.<extension>: the file's name isn't in
  * it (the receiving app asks for that, see DecryptedFileProvider), only the extension, which the
@@ -27,7 +29,18 @@ object Shares {
         val open: () -> BlobSource, val key: ByteArray, val name: String, val mime: String, val size: Long, val expires: Long,
         /** True if it reads from the open vault, so it ends when the vault locks. */
         val needsVault: Boolean,
-    )
+        /** Which vault it's from (see [VaultStore.shareOwner]). */
+        val owner: ByteArray,
+    ) {
+        /** Readers open on it (see DecryptedFileProvider), each with its own copy of the key. */
+        internal val readers: MutableSet<java.io.Closeable> = ConcurrentHashMap.newKeySet()
+
+        internal fun end() {
+            key.fill(0)
+            owner.fill(0)
+            readers.toList().forEach { r -> if (readers.remove(r)) runCatching { r.close() } }
+        }
+    }
 
     private val live = ConcurrentHashMap<String, Share>()
 
@@ -40,7 +53,7 @@ object Shares {
         val token = Aead.hex(Aead.random(16))
         live[token] = Share(
             store.shareSource(e), store.keyBytes(e), e.name, e.mime, e.size, now() + LIFETIME_MS,
-            needsVault = !store.sharesOutliveLock(e),
+            needsVault = !store.sharesOutliveLock(e), owner = store.shareOwner.copyOf(),
         )
         // Expired links are swept away (their keys zeroed) even if nothing asks for them again.
         main.postDelayed({ sweep() }, LIFETIME_MS + 1000)
@@ -48,26 +61,53 @@ object Shares {
         return Uri.parse("content://${context.packageName}.files/$token" + if (ext != null) "/file.$ext" else "")
     }
 
-    /** Ends every link that has expired, zeroing its key. */
+    /** Ends the links that match [which]. */
+    private fun endWhere(which: (Share) -> Boolean) {
+        live.entries.filter { which(it.value) }.forEach { (token, s) -> if (live.remove(token, s)) s.end() }
+    }
+
+    /** Ends every link that has expired, zeroing its key and closing its readers. */
     fun sweep() {
         val now = now()
-        live.entries.filter { now > it.value.expires }.forEach { (token, s) -> if (live.remove(token, s)) s.key.fill(0) }
+        endWhere { now > it.expires }
     }
 
     /** Called when the vault locks: ends expired links, and those that read from the vault. */
     fun vaultLocked() {
         sweep()
-        live.entries.filter { it.value.needsVault }.forEach { (token, s) -> if (live.remove(token, s)) s.key.fill(0) }
+        endWhere { it.needsVault }
+    }
+
+    /** Called when a vault is unlocked: ends every link from any other vault. */
+    fun vaultOpened(owner: ByteArray) {
+        endWhere { !it.owner.contentEquals(owner) }
     }
 
     fun get(uri: Uri): Share? {
         val token = uri.pathSegments.firstOrNull() ?: return null
         val s = live[token] ?: return null
         if (now() > s.expires) {
-            live.remove(token)?.key?.fill(0)
+            if (live.remove(token, s)) s.end()
             return null
         }
         return s
+    }
+
+    /**
+     * Ties [reader] to the share [uri] names, so it's closed when the share ends. Returns false,
+     * having closed it, if the share has ended already.
+     */
+    fun attach(uri: Uri, share: Share, reader: java.io.Closeable): Boolean {
+        share.readers += reader
+        // Checked after adding: a share that ends from here on closes it itself.
+        if (get(uri) === share) return true
+        detach(share, reader)
+        return false
+    }
+
+    /** Closes [reader], unless the share's end has closed it already. */
+    fun detach(share: Share, reader: java.io.Closeable) {
+        if (share.readers.remove(reader)) runCatching { reader.close() }
     }
 
     fun isLive(uri: Uri) = get(uri) != null
@@ -79,7 +119,6 @@ object Shares {
     }
 
     fun clear() {
-        live.values.forEach { it.key.fill(0) }
-        live.clear()
+        endWhere { true }
     }
 }

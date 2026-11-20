@@ -224,6 +224,9 @@ object Session {
             }
         }
         if (storage is ContainerStorage && r.role == Role.MAIN) runCatching { PlainPrefs.mainInContainers = true }
+        // Links handed out from another vault end now: they may outlive its lock by a while, and
+        // must not still work while a decoy is open. This vault's own keep going.
+        Shares.vaultOpened(store.shareOwner)
         _state.value = Unlocked(r.role, r.slot, r.master, store)
         // Quietly bring old-format files up to date (padding, fixed-size previews).
         thread(name = "enclave-upgrade", isDaemon = true) { runCatching { store.upgradeOldFiles() } }
