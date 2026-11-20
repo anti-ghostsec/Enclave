@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.view.View
+import android.view.Window
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -23,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -34,6 +36,7 @@ import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,10 +45,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.enclave.crypto.Aead
 import app.enclave.crypto.Kdf
@@ -112,10 +117,55 @@ inline fun <T> withChars(s: String, block: (CharArray) -> T): T {
  * tools for people with disabilities can't read it; and from Android 12, other apps' overlays are
  * hidden while it's on screen, so nothing can be drawn over the password field or the files.
  */
-fun Activity.protectWindow() {
-    window.decorView.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
-    if (Build.VERSION.SDK_INT >= 34) window.decorView.setAccessibilityDataSensitive(View.ACCESSIBILITY_DATA_SENSITIVE_YES)
-    if (Build.VERSION.SDK_INT >= 31) window.setHideOverlayWindows(true)
+fun Activity.protectWindow() = window.protect()
+
+private fun Window.protect() {
+    decorView.protectContent()
+    if (Build.VERSION.SDK_INT >= 31) setHideOverlayWindows(true)
+}
+
+/** No autofill for anything in this view or under it, and (Android 14) only accessibility tools may read it. */
+private fun View.protectContent() {
+    importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
+    if (Build.VERSION.SDK_INT >= 34) setAccessibilityDataSensitive(View.ACCESSIBILITY_DATA_SENSITIVE_YES)
+}
+
+/**
+ * Gives the window this is composed in what [protectWindow] gives an activity's. A dialog and a
+ * popup menu each get a window of their own, which the activity's settings don't reach: place
+ * this inside every one. Screenshots are blocked in them already (they take FLAG_SECURE from the
+ * activity). A popup's window isn't Enclave's to change, so it gets the autofill and
+ * accessibility settings on its views.
+ */
+@Composable
+fun ProtectThisWindow() {
+    val view = LocalView.current
+    DisposableEffect(view) {
+        val dialog = (view.parent as? DialogWindowProvider)?.window
+        if (dialog != null) dialog.protect() else view.rootView.protectContent()
+        onDispose { }
+    }
+}
+
+/** An AlertDialog whose window is protected like the activity's (see [ProtectThisWindow]). Use it for every dialog. */
+@Composable
+fun EnclaveDialog(
+    onDismissRequest: () -> Unit,
+    confirmButton: @Composable () -> Unit,
+    dismissButton: @Composable (() -> Unit)? = null,
+    title: @Composable (() -> Unit)? = null,
+    text: @Composable (() -> Unit)? = null,
+) {
+    AlertDialog(
+        onDismissRequest = onDismissRequest,
+        confirmButton = {
+            ProtectThisWindow()
+            confirmButton()
+        },
+        dismissButton = dismissButton,
+        title = title,
+        text = text,
+    )
 }
 
 /**
@@ -229,6 +279,7 @@ fun KeyfileRow(state: KeyfileState, allowCreate: Boolean) {
                     leadingIcon = { Icon(Icons.Default.Key, null) },
                 )
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    ProtectThisWindow()
                     DropdownMenuItem(
                         text = { Text("Browse folders") },
                         onClick = { menu = false; browsing = true },

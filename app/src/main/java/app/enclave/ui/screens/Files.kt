@@ -26,6 +26,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
+import app.enclave.ui.EnclaveDialog
+import app.enclave.ui.ProtectThisWindow
 import app.enclave.vault.Media
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import java.text.DateFormat
@@ -77,7 +79,6 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.UploadFile
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExtendedFloatingActionButton
@@ -285,6 +286,7 @@ private fun FilesContent(
                     Box {
                         IconButton(onClick = { sortMenu = true }) { Icon(Icons.AutoMirrored.Filled.Sort, "Sort") }
                         DropdownMenu(expanded = sortMenu, onDismissRequest = { sortMenu = false }) {
+                            ProtectThisWindow()
                             listOf("name" to "Name", "date" to "Date added", "size" to "Size", "type" to "Type").forEach { (k, label) ->
                                 DropdownMenuItem(
                                     text = { Text(label) },
@@ -346,6 +348,7 @@ private fun FilesContent(
             @Composable
             fun ItemMenu(e: Entry, expanded: Boolean, onClose: () -> Unit) {
                 DropdownMenu(expanded = expanded, onDismissRequest = onClose) {
+                    ProtectThisWindow()
                     if (!e.folder) {
                         DropdownMenuItem(text = { Text("Share") }, onClick = { onClose(); share(listOf(e.id)) })
                         DropdownMenuItem(text = { Text("Open with another app") }, onClick = { onClose(); Opener.openExternally(ctx, store, e, alwaysAsk = true) })
@@ -433,6 +436,7 @@ private fun FilesContent(
                 icon = { Icon(Icons.Default.Add, null) }, text = { Text("Add") },
             )
             DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {
+                ProtectThisWindow()
                 DropdownMenuItem(
                     text = { Text("Photos & videos") }, leadingIcon = { Icon(Icons.Default.PhotoLibrary, null) },
                     onClick = {
@@ -468,7 +472,7 @@ private fun FilesContent(
     }
     if (deleting.isNotEmpty()) {
         val one = if (deleting.size == 1) all.firstOrNull { it.id == deleting[0] } else null
-        AlertDialog(
+        EnclaveDialog(
             onDismissRequest = { deleting = emptyList() },
             title = { Text(if (one != null) "Delete “${one.name}”?" else "Delete ${deleting.size} items?") },
             text = { Text("Folders are deleted with everything in them. This can't be undone.") },
@@ -496,7 +500,7 @@ private fun FilesContent(
         }
     }
     if (deleteOriginals.isNotEmpty()) {
-        AlertDialog(
+        EnclaveDialog(
             onDismissRequest = { deleteOriginals = emptyList() },
             title = { Text("Delete the originals?") },
             text = {
@@ -545,7 +549,7 @@ private fun MoveDialog(store: VaultStore, all: List<Entry>, ids: List<String>, o
             .map { it to store.pathOf(it) }
             .sortedBy { it.second.lowercase() }
     }
-    AlertDialog(
+    EnclaveDialog(
         onDismissRequest = onDismiss,
         title = { Text("Move ${ids.size} item(s) to…") },
         text = {
@@ -634,7 +638,7 @@ private fun sortEntries(list: List<Entry>, by: String, descending: Boolean): Lis
 @Composable
 private fun NameDialog(title: String, initial: String, onDismiss: () -> Unit, onOk: (String) -> Unit) {
     var name by remember { mutableStateOf(initial) }
-    AlertDialog(
+    EnclaveDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = { OutlinedTextField(name, { name = it }, singleLine = true, keyboardOptions = PrivateKeyboard) },

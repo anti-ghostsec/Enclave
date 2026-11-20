@@ -33,7 +33,6 @@ import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.PlayCircle
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
@@ -113,6 +112,7 @@ fun StorageBrowser(
     }
 
     Dialog(onDismissRequest = ::up, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        ProtectThisWindow()
         Surface(Modifier.fillMaxSize()) {
             Column(Modifier.systemBarsPadding()) {
                 Row(Modifier.fillMaxWidth().padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -186,7 +186,7 @@ fun StorageBrowser(
 
     if (newFolder) {
         var name by remember { mutableStateOf("") }
-        AlertDialog(
+        EnclaveDialog(
             onDismissRequest = { newFolder = false },
             title = { Text("New folder") },
             text = { OutlinedTextField(name, { name = it }, singleLine = true, keyboardOptions = PrivateKeyboard) },

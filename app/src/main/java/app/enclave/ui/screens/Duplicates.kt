@@ -13,7 +13,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
@@ -39,6 +38,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import app.enclave.ui.EnclaveDialog
+import app.enclave.ui.ProtectThisWindow
 import app.enclave.vault.Entry
 import app.enclave.vault.VaultStore
 import kotlinx.coroutines.Dispatchers
@@ -63,6 +64,7 @@ fun DuplicatesScreen(store: VaultStore, onClose: () -> Unit) {
     }
 
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        ProtectThisWindow()
         Surface(Modifier.fillMaxSize()) {
             Column(Modifier.systemBarsPadding()) {
                 Row(Modifier.fillMaxWidth().padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -122,7 +124,7 @@ fun DuplicatesScreen(store: VaultStore, onClose: () -> Unit) {
     }
 
     if (confirm) {
-        AlertDialog(
+        EnclaveDialog(
             onDismissRequest = { confirm = false },
             title = { Text("Delete ${selected.size} file(s)?") },
             text = { Text("They're removed from the vault for good. Unticked copies are kept.") },

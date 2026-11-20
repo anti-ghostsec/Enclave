@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ListItem
@@ -78,7 +77,7 @@ private fun ShareDialog(store: VaultStore, files: List<Entry>, onDone: () -> Uni
     val target = confirming
     if (target != null) {
         val app = labelOf(target, pm)
-        AlertDialog(
+        EnclaveDialog(
             onDismissRequest = { confirming = null },
             title = { Text("Send to $app?") },
             text = {
@@ -101,7 +100,7 @@ private fun ShareDialog(store: VaultStore, files: List<Entry>, onDone: () -> Uni
         return
     }
 
-    AlertDialog(
+    EnclaveDialog(
         onDismissRequest = onDone,
         title = { Text(if (files.size == 1) "Share “${files[0].name}” with…" else "Share ${files.size} files with…") },
         text = {
@@ -149,7 +148,7 @@ fun ShareAppsEditor(store: VaultStore, targets: List<ResolveInfo>, onDone: () ->
     val ctx = LocalContext.current
     val pm = ctx.packageManager
     val chosen = remember { mutableStateListOf<String>().apply { addAll(store.settings.value.shareApps) } }
-    AlertDialog(
+    EnclaveDialog(
         onDismissRequest = onDone,
         title = { Text("Apps you can share to") },
         text = {

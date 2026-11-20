@@ -41,7 +41,6 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Slideshow
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.TextButton
@@ -78,6 +77,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.enclave.ui.EnclaveDialog
 import app.enclave.ui.Opener
 import app.enclave.vault.EncryptedMediaSource
 import app.enclave.vault.Entry
@@ -184,7 +184,7 @@ fun ViewerScreen(store: VaultStore, items: List<Entry>, start: Int, onClose: (la
     }
 
     if (confirmDelete) {
-        AlertDialog(
+        EnclaveDialog(
             onDismissRequest = { confirmDelete = false },
             title = { Text("Delete “${current.name}”?") },
             text = { Text("It will be removed from the vault for good.") },

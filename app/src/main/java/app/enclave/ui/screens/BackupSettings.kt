@@ -3,7 +3,6 @@ package app.enclave.ui.screens
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -20,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
+import app.enclave.ui.EnclaveDialog
 import app.enclave.crypto.Aead
 import app.enclave.ui.BrowseMode
 import app.enclave.ui.PasswordField
@@ -121,7 +121,7 @@ private fun NewBackupPasswordDialog(onDismiss: () -> Unit, onOk: (String) -> Uni
         confirm.isNotEmpty() && pw != confirm -> "Passwords don't match"
         else -> null
     }
-    AlertDialog(
+    EnclaveDialog(
         onDismissRequest = onDismiss,
         title = { Text("Backup password") },
         text = {
@@ -146,7 +146,7 @@ private fun NewBackupPasswordDialog(onDismiss: () -> Unit, onOk: (String) -> Uni
 @Composable
 private fun BackupPasswordDialog(onDismiss: () -> Unit, onOk: (String) -> Unit) {
     var pw by remember { mutableStateOf("") }
-    AlertDialog(
+    EnclaveDialog(
         onDismissRequest = onDismiss,
         title = { Text("Backup password") },
         text = {
@@ -168,7 +168,7 @@ private fun WorkingDialog(st: BackupStep.Working) {
         view.keepScreenOn = true
         onDispose { view.keepScreenOn = false }
     }
-    AlertDialog(
+    EnclaveDialog(
         onDismissRequest = {},
         title = { Text(st.title) },
         text = {

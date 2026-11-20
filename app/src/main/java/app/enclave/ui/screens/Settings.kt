@@ -31,7 +31,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
@@ -61,9 +60,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.enclave.ui.EnclaveDialog
 import app.enclave.crypto.HardwareKey
 import app.enclave.disguise.Disguise
 import app.enclave.ui.KeyfileRow
@@ -236,7 +237,7 @@ private fun ChangePasswordDialog(onDone: () -> Unit) {
     val keyfile = remember { KeyfileState() }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    AlertDialog(
+    EnclaveDialog(
         onDismissRequest = { if (!busy) onDone() },
         title = { Text("New password") },
         text = {
@@ -283,7 +284,7 @@ private fun AddDuressDialog(onDone: () -> Unit) {
     var action by remember { mutableStateOf("decoy") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    AlertDialog(
+    EnclaveDialog(
         onDismissRequest = { if (!busy) onDone() },
         title = { Text("Add duress password") },
         text = {
@@ -326,7 +327,7 @@ private fun AddDuressDialog(onDone: () -> Unit) {
 @Composable
 private fun CalculatorCodeDialog(onDismiss: () -> Unit, onSet: (String) -> Unit) {
     var code by remember { mutableStateOf("") }
-    AlertDialog(
+    EnclaveDialog(
         onDismissRequest = onDismiss,
         title = { Text("Calculator code") },
         text = {
@@ -334,7 +335,9 @@ private fun CalculatorCodeDialog(onDismiss: () -> Unit, onSet: (String) -> Unit)
                 Text("Digits only, 4–12 long. Type it into the calculator and press = to open Enclave.", style = MaterialTheme.typography.bodySmall)
                 OutlinedTextField(
                     code, { v -> code = v.filter { it.isDigit() }.take(12) }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, autoCorrectEnabled = false),
+                    // Shown as dots, like a password: it's the way past the calculator.
+                    visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }
@@ -388,7 +391,7 @@ private fun adaptiveIcon(src: Bitmap): Bitmap {
 @Composable
 private fun WipeDialog(onDismiss: () -> Unit) {
     var typed by remember { mutableStateOf("") }
-    AlertDialog(
+    EnclaveDialog(
         onDismissRequest = onDismiss,
         title = { Text("Wipe everything?") },
         text = {
@@ -502,7 +505,7 @@ private fun OpeningSettings(s: Session.Unlocked) {
             add(Opener.ASK to "Ask every time")
             apps.forEach { add(it) }
         }
-        AlertDialog(
+        EnclaveDialog(
             onDismissRequest = { choosing = null },
             title = { Text(title) },
             text = {
