@@ -94,8 +94,10 @@ private fun Root() {
         // Keyed by the session, so nothing remembered for one vault survives into the next.
         u != null -> key(u) { HomeScreen(u) }
         b != null -> BusyScreen(b)
-        !exists -> SetupScreen()
+        // The calculator front comes before everything else, the offer to create a vault too:
+        // whatever happened to the vault, a calculator icon opens on a calculator.
         PlainPrefs.calculatorFacade && !facadePassed -> CalculatorScreen(onSecret = { facadePassed = true })
+        !exists -> SetupScreen()
         else -> LockScreen()
     }
 }

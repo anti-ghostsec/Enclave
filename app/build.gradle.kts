@@ -13,8 +13,8 @@ android {
         applicationId = "app.enclave"
         minSdk = 29
         targetSdk = 36
-        versionCode = 11
-        versionName = "0.6.0"
+        versionCode = 12
+        versionName = "0.6.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Phones, and x86_64 for emulators and PCs running Android, which can't run ARM code.
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }

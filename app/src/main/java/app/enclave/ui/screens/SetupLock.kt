@@ -42,7 +42,6 @@ import app.enclave.ui.PasswordField
 import app.enclave.ui.withChars
 import app.enclave.vault.Session
 import app.enclave.vault.VaultActions
-import app.enclave.vault.VaultManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -105,7 +104,7 @@ fun SetupScreen() {
                 scope.launch {
                     val usesKeyfile = keyfile.secret != null
                     val made = withContext(Dispatchers.Default) {
-                        runCatching { Session.open(withChars(pw) { VaultManager.create(it, keyfile.secret) }) }.isSuccess
+                        runCatching { withChars(pw) { VaultActions.create(it, keyfile.secret) } }.isSuccess
                     }
                     if (!made) {
                         busy = false

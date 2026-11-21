@@ -28,6 +28,12 @@ object Session {
         var sessionPassword: ByteArray? = null
 
         /**
+         * A tag of this vault's password without its keyfile, when it was opened with one; null
+         * when it has none. Guarded by [sessionDuress] (see [VaultActions.clash]).
+         */
+        var passwordAlone: ByteArray? = null
+
+        /**
          * The lock settings a decoy session was asked to set (see [VaultActions.wipeAfterFailures]).
          * They start as the real ones, so a decoy shows what the real vault would.
          */
@@ -96,15 +102,24 @@ object Session {
         private set
 
     @Volatile private var stopWork = false
+
+    /** What [open] was given for the vault with this key, until that vault is ready. */
+    private class Pending(val master: ByteArray, val passwordAlone: ByteArray?, val notice: String?)
+    @Volatile private var pending: Pending? = null
     @Volatile private var worker: Thread? = null
 
     /**
      * Opens the vault: from the containers if it lives there, moving it there first if it's in the
      * original format, or making it there if it's new. Slow steps run in the background while
      * [busy] says what's happening.
+     *
+     * [passwordAlone] becomes the session's (see [Unlocked.passwordAlone]) and [notice] its
+     * message, whenever it is that the vault is ready.
      */
     @Synchronized
-    fun open(r: UnlockResult) {
+    fun open(r: UnlockResult, passwordAlone: ByteArray? = null, notice: String? = null) {
+        pending?.passwordAlone?.fill(0)
+        pending = Pending(r.master, passwordAlone, notice)
         val segs = Segments(VaultManager.containersDir)
         segments = segs
         stopWork = false
@@ -234,7 +249,13 @@ object Session {
         // Links handed out from another vault end now: they may outlive its lock by a while, and
         // must not still work while a decoy is open. This vault's own keep going.
         Shares.vaultOpened(store.shareOwner)
-        _state.value = Unlocked(r.role, r.slot, r.master, store)
+        val unlocked = Unlocked(r.role, r.slot, r.master, store)
+        pending?.takeIf { it.master === r.master }?.let { p ->
+            pending = null
+            synchronized(unlocked.sessionDuress) { unlocked.passwordAlone = p.passwordAlone }
+            if (p.notice != null && store.problem.value == null) store.problem.value = p.notice
+        }
+        _state.value = unlocked
         // Quietly bring old-format files up to date (padding, fixed-size previews).
         thread(name = "enclave-upgrade", isDaemon = true) { runCatching { store.upgradeOldFiles() } }
     }
@@ -245,12 +266,15 @@ object Session {
         val s = _state.value
         _state.value = null
         _busy.value = null
+        pending?.passwordAlone?.fill(0)
+        pending = null
         s?.store?.close()
         s?.master?.let(Aead::wipe)
         s?.sessionDuress?.let { list ->
             synchronized(list) {
                 list.forEach { it.second.fill(0) }; list.clear()
                 s.sessionPassword?.fill(0); s.sessionPassword = null
+                s.passwordAlone?.fill(0); s.passwordAlone = null
             }
         }
         // Links that read from the vault can't work any more, and expired ones are done.

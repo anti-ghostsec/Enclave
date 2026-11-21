@@ -177,3 +177,34 @@ object StateKey {
      */
     val front = KeystoreKey("enclave_front_v1", preferStrongBox = false)
 }
+
+/**
+ * Says a wipe is under way, from before the first thing is destroyed until the last is. Keys,
+ * not files, so the mark isn't in the app's files and outlives the header it's about. If one is
+ * found at a start, that wipe was cut off and is finished then (see VaultManager.recover).
+ */
+object WipeMark {
+    enum class Kind {
+        /** The lock screen stays as it was (a duress password, or too many wrong ones). */
+        HIDDEN,
+        /** Asked for in Settings: no vault is left, and Enclave offers to create one. */
+        OPEN,
+    }
+
+    private val hidden = KeystoreKey("enclave_mark_wipe_hidden", preferStrongBox = false)
+    private val open = KeystoreKey("enclave_mark_wipe_open", preferStrongBox = false)
+
+    fun set(kind: Kind) = (if (kind == Kind.HIDDEN) hidden else open).ensure()
+
+    /** The wipe that was cut off, if one was. Throws if the keystore can't be asked. */
+    fun pending(): Kind? = when {
+        hidden.exists() -> Kind.HIDDEN
+        open.exists() -> Kind.OPEN
+        else -> null
+    }
+
+    fun clear() {
+        hidden.destroy()
+        open.destroy()
+    }
+}

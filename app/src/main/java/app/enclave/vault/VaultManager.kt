@@ -4,6 +4,7 @@ import android.content.Context
 import app.enclave.crypto.Aead
 import app.enclave.crypto.HardwareKey
 import app.enclave.crypto.Kdf
+import app.enclave.crypto.WipeMark
 import java.io.File
 import java.nio.ByteBuffer
 
@@ -64,6 +65,7 @@ object VaultManager {
         app = context.applicationContext
         // Left behind if Enclave was killed while a decoy was open. The folder itself is always
         // there, empty, so its presence says nothing about which vault is or was open.
+        recover()
         scratchDir.listFiles()?.forEach { it.deleteRecursively() }
         scratchDir.mkdirs()
         scratchDir.setLastModified(VaultStore.FIXED_TIME)
@@ -74,6 +76,18 @@ object VaultManager {
         // Touched at every start too, so its change time says when Enclave last started rather
         // than when a password was last changed (see the README's known limits).
         if (headerFile.exists()) headerFile.setLastModified(VaultStore.FIXED_TIME)
+    }
+
+    /**
+     * Finishes what a kill left half done, before anything asks whether a vault exists: a header
+     * whose save was cut off between deleting the old file and moving the new one into place,
+     * and a wipe that was cut off (see [wipeAll]).
+     */
+    fun recover() {
+        val tmp = File(headerFile.path + ".tmp")
+        if (!headerFile.exists() && tmp.exists()) tmp.renameTo(headerFile)
+        val cutOff = runCatching { WipeMark.pending() }.getOrNull() ?: return
+        wipeAll(keepLockScreen = cutOff == WipeMark.Kind.HIDDEN)
     }
 
     /** Gives a directory and everything directly in it the fixed modified time. */
@@ -157,15 +171,17 @@ object VaultManager {
 
     /**
      * Runs Argon2id once, then tries every slot. Returns null for a wrong password/keyfile.
+     * [tag] is given a tag of the password as typed (see [Probe]), whether it opened anything.
      *
      * Every slot is always tried. Should one password ever open two slots, the real vault wins:
      * a decoy made by an earlier version could be given any password from inside it, and that
      * must never put the real vault out of reach.
      */
-    fun unlock(password: CharArray, keyfileSecret: ByteArray?): UnlockResult? {
+    fun unlock(password: CharArray, keyfileSecret: ByteArray?, tag: ((ByteArray) -> Unit)? = null): UnlockResult? {
         val h = read()
         val kek = Kdf.derive(password, keyfileSecret, h.salt, h.params)
         try {
+            tag?.invoke(passwordTag(kek))
             var best: UnlockResult? = null
             for (i in 0 until Header.SLOT_COUNT) {
                 val plain = runCatching { Aead.open(kek, h.slots[i], h.slotAad(i)) }.getOrNull() ?: continue
@@ -200,11 +216,13 @@ object VaultManager {
             val opens = slots.filter { i ->
                 runCatching { Aead.open(kek, h.slots[i], h.slotAad(i)) }.getOrNull()?.also { it.fill(0) } != null
             }
-            return Probe(opens.toSet(), Aead.sha256(kek, "password tag".toByteArray()))
+            return Probe(opens.toSet(), passwordTag(kek))
         } finally {
             Aead.wipe(kek)
         }
     }
+
+    private fun passwordTag(kek: ByteArray) = Aead.sha256(kek, "password tag".toByteArray())
 
     /** (Re)writes one slot, e.g. for a password change or a new duress password. */
     fun setSlot(slot: Int, password: CharArray, keyfileSecret: ByteArray?, role: Role, master: ByteArray) {
@@ -244,10 +262,26 @@ object VaultManager {
      * The containers are kept: every key that opened anything in them came from the destroyed
      * header, so they're now nothing but random bytes. A new vault reuses them straight away
      * instead of spending a minute writing fresh random bytes, which matters most under duress.
+     *
+     * With [keepLockScreen] (a wipe nobody is meant to notice: a duress password, or too many
+     * wrong ones) the header is never missing, not for a moment: a header no password opens takes
+     * the old one's place in one step. If the header were deleted first and Enclave killed just
+     * then, the next start would find no vault and offer to create one, in front of whoever is
+     * holding the phone and ahead of the calculator front. Without it (a wipe asked for in
+     * Settings) the header is deleted and the next thing shown is the offer to create a vault.
+     *
+     * A mark in the keystore says a wipe is under way, from before anything is destroyed until
+     * it's all done. If Enclave is killed in between, the next start finishes it ([recover]), and
+     * so does the next password typed.
      */
-    fun wipeAll() {
+    fun wipeAll(keepLockScreen: Boolean) {
+        runCatching { WipeMark.set(if (keepLockScreen) WipeMark.Kind.HIDDEN else WipeMark.Kind.OPEN) }
         HardwareKey.destroy()
-        headerFile.delete()
+        // If the new header can't be written (storage full, say), the old one stays where it is,
+        // unreadable for good now its key is gone, and the mark stays so this is tried again.
+        val done = if (keepLockScreen) runCatching { createUnopenable() }.isSuccess else headerFile.delete() || !headerFile.exists()
+        File(headerFile.path + ".tmp").delete()
         vaultsRoot.deleteRecursively()
+        if (done) WipeMark.clear()
     }
 }

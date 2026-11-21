@@ -23,13 +23,21 @@ object VaultActions {
         // The attempt is counted, on the disk, before the password is tried. If the count can't
         // be saved, nothing is tried.
         val attempt = PlainPrefs.beginAttempt() ?: return Outcome.NotSaved
+        // A wipe that was cut off, and that the start couldn't finish, is finished first.
+        VaultManager.recover()
         // Duress passwords never use a keyfile, so with a keyfile selected the password is also
         // tried without it. Both are always tried, so a duress password takes exactly as long as
         // the real one and the time taken gives nothing away.
         val withKeyfile = VaultManager.unlock(password, keyfileSecret)
-        val without = if (keyfileSecret != null) VaultManager.unlock(password, null) else null
+        // A tag of the password typed, as it is without the keyfile: kept by the session it
+        // opens, so the same password can't be added there as a duress password (see [taken]).
+        var alone: ByteArray? = null
+        val without = if (keyfileSecret != null) VaultManager.unlock(password, null) { alone = it } else null
         val r = withKeyfile ?: without
-        if (withKeyfile != null) without?.master?.let(Aead::wipe)
+        // The same password opens this vault with the keyfile and a duress slot without it.
+        // Versions up to 0.6.0 let that be set up; the real vault says so once it's open.
+        val sameAsDuress = withKeyfile?.role == Role.MAIN && without != null
+        if (withKeyfile != null) without?.master?.let(Aead::wipe) else alone?.fill(0).also { alone = null }
         if (r == null) {
             val max = PlainPrefs.wipeAfterFailures
             if (max > 0 && PlainPrefs.failedAttempts >= max) {
@@ -39,8 +47,7 @@ object VaultActions {
                     // from now on every password is simply "wrong". The count of wrong passwords
                     // stays too, so the lock-out goes on growing as it would have.
                     val start = SystemClock.elapsedRealtime()
-                    wipeEverything(keepCount = true)
-                    VaultManager.createUnopenable()
+                    wipeEverything(keepCount = true, keepLockScreen = true)
                     PlainPrefs.wipedForFailuresMs = SystemClock.elapsedRealtime() - start
                 } else {
                     // Already done once. Wiping again would write a new header (and make a new
@@ -59,18 +66,19 @@ object VaultActions {
         // password a few at a time for ever, with no lock-out and no wipe.
         if (r.role == Role.MAIN) PlainPrefs.resetFailures() else PlainPrefs.cancelAttempt(attempt)
         when (r.role) {
-            Role.MAIN, Role.DECOY -> Session.open(r)
+            Role.MAIN, Role.DECOY -> Session.open(r, alone, SAME_AS_DURESS_MESSAGE.takeIf { sameAsDuress })
             Role.WIPE -> {
                 // Duress: destroy the real vault, then quietly open a fresh, empty one under
                 // the same password so the person watching just sees an empty vault.
+                // The lock screen's header is never missing meanwhile: one no password opens
+                // stands in until the new vault's takes its place.
                 Aead.wipe(r.master)
-                wipeEverything()
+                wipeEverything(keepLockScreen = true)
                 val fresh = try {
                     VaultManager.create(password, null)
                 } catch (_: Exception) {
                     // The lock settings couldn't be saved, so no vault can be made. Everything is
-                    // destroyed already: leave the lock screen as it was, every password wrong.
-                    VaultManager.createUnopenable()
+                    // destroyed already: the lock screen stays as it was, every password wrong.
                     return Outcome.Wrong
                 }
                 Session.open(fresh)
@@ -86,6 +94,10 @@ object VaultActions {
         }
         return Outcome.Opened
     }
+
+    const val SAME_AS_DURESS_MESSAGE =
+        "One of your duress passwords is the same as this vault's password. Typed without the keyfile, it " +
+            "acts as the duress password. Remove that duress password in Settings, or change this vault's password."
 
     /** The longest a wrong password after a wipe waits, whatever the wipe took. */
     private const val MAX_WIPE_WAIT_MS = 10_000L
@@ -116,10 +128,14 @@ object VaultActions {
         if (s.role == Role.MAIN) PlainPrefs.autoLockSeconds = n else s.sessionAutoLock = n
     }
 
-    fun wipeEverything(keepCount: Boolean = false) {
+    /**
+     * Destroys every vault. With [keepLockScreen] a header no password opens is left in place of
+     * the old one, so the lock screen (and the calculator front before it) stay as they were.
+     */
+    fun wipeEverything(keepCount: Boolean = false, keepLockScreen: Boolean = false) {
         Shares.clear()
         Session.lock()
-        VaultManager.wipeAll()
+        VaultManager.wipeAll(keepLockScreen)
         PlainPrefs.mainInContainers = false
         if (!keepCount) PlainPrefs.resetFailures()
     }
@@ -135,18 +151,53 @@ object VaultActions {
     private fun taken(s: Session.Unlocked, password: CharArray, keyfileSecret: ByteArray?): Taken {
         val known = if (s.role == Role.MAIN) (0 until Header.SLOT_COUNT).toList() else listOf(s.slot)
         val p = VaultManager.probe(password, keyfileSecret, known)
+        // The lock screen tries every password without the keyfile too, and duress passwords are
+        // set without one. So a password given with a keyfile must be free without it as well.
+        val bare = if (keyfileSecret != null) VaultManager.probe(password, null, known) else p
         return synchronized(s.sessionDuress) {
-            val mine = s.sessionPassword
-            Taken(
-                other = (p.opens - s.slot).isNotEmpty() || s.sessionDuress.any { it.second.contentEquals(p.tag) },
-                own = if (mine != null) mine.contentEquals(p.tag) else s.slot in p.opens,
-                tag = p.tag,
+            clash(
+                slot = s.slot, opens = p.opens, bareOpens = bare.opens, tag = p.tag, bareTag = bare.tag,
+                sessionPassword = s.sessionPassword, passwordAlone = s.passwordAlone,
+                sessionDuress = s.sessionDuress.map { it.second },
             )
         }
     }
 
-    /** [other]: another password here is the same. [own]: it's this vault's current password. */
-    private class Taken(val other: Boolean, val own: Boolean, val tag: ByteArray)
+    /**
+     * [other]: another password here is the same. [own]: it's this vault's current password,
+     * with its keyfile or without. [bareTag]: the password's tag without a keyfile.
+     */
+    internal class Taken(val other: Boolean, val own: Boolean, val tag: ByteArray, val bareTag: ByteArray)
+
+    /**
+     * Whether a password is in use, from what a session knows. [opens] and [tag] are for the
+     * password as given (with the keyfile, if there is one); [bareOpens] and [bareTag] for the
+     * password alone, the same when there's no keyfile.
+     *
+     * [passwordAlone] is the tag of this vault's own password without its keyfile, when it has
+     * one. Without it, a duress password could be made the same as the real one: the two open
+     * different slots (one with the keyfile, one without), so neither looked taken, and typing
+     * the real password and forgetting the keyfile then set the duress password off.
+     */
+    internal fun clash(
+        slot: Int, opens: Set<Int>, bareOpens: Set<Int>, tag: ByteArray, bareTag: ByteArray,
+        sessionPassword: ByteArray?, passwordAlone: ByteArray?, sessionDuress: List<ByteArray>,
+    ): Taken = Taken(
+        other = (opens - slot).isNotEmpty() || (bareOpens - slot).isNotEmpty() || sessionDuress.any { it.contentEquals(bareTag) },
+        own = (if (sessionPassword != null) sessionPassword.contentEquals(tag) else slot in opens) ||
+            (passwordAlone != null && passwordAlone.contentEquals(bareTag)),
+        tag = tag, bareTag = bareTag,
+    )
+
+    /**
+     * Makes a new vault and opens it. With a keyfile, the session also gets the tag of the
+     * password alone, as [unlock] gives it, at the cost of one more Argon2id run.
+     */
+    fun create(password: CharArray, keyfileSecret: ByteArray?) {
+        val made = VaultManager.create(password, keyfileSecret)
+        val alone = if (keyfileSecret != null) VaultManager.probe(password, null, emptyList()).tag else null
+        Session.open(made, alone)
+    }
 
     /** Changes this vault's password. Returns false if another password here is the same. */
     fun changePassword(newPassword: CharArray, keyfileSecret: ByteArray?): Boolean {
@@ -163,11 +214,13 @@ object VaultActions {
             synchronized(s.sessionDuress) {
                 s.sessionPassword?.fill(0)
                 s.sessionPassword = t.tag
+                s.passwordAlone = t.bareTag.takeIf { keyfileSecret != null }
             }
             s.store.updateSettings { it.copy(usesKeyfile = keyfileSecret != null) }
             return true
         }
         VaultManager.setSlot(s.slot, newPassword, keyfileSecret, s.role, s.master)
+        synchronized(s.sessionDuress) { s.passwordAlone = t.bareTag.takeIf { keyfileSecret != null } }
         s.store.updateSettings { it.copy(usesKeyfile = keyfileSecret != null) }
         return true
     }
