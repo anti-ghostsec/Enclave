@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -63,11 +64,13 @@ class PickActivity : ComponentActivity() {
                     var focus by remember(s) { mutableStateOf<String?>(null) }
                     // With the calculator front on, it stands in front of the password here too,
                     // again after every lock.
-                    var facadePassed by remember { mutableStateOf(false) }
-                    LaunchedEffect(s) { if (s == null) facadePassed = false }
+                    // and whenever the lock screen starts over (see Session.front).
+                    val front by Session.front.collectAsState()
+                    var passedAt by remember { mutableStateOf(-1) }
+                    LaunchedEffect(s) { if (s == null) passedAt = -1 }
                     if (s == null) {
-                        if (PlainPrefs.calculatorFacade && !facadePassed) CalculatorScreen(onSecret = { facadePassed = true })
-                        else LockScreen()
+                        if (PlainPrefs.calculatorFacade && passedAt != front) CalculatorScreen(onSecret = { passedAt = front })
+                        else key(front) { LockScreen() }
                     } else key(s) {
                         // Keyed by the session, like the main screen: the lock in between can be
                         // missed while this screen is stopped, and nothing remembered for one vault
@@ -102,7 +105,7 @@ class PickActivity : ComponentActivity() {
         if (files.isEmpty()) return
         val uris = files.map { Shares.create(this, store, it) }
         val result = Intent().setData(uris[0]).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        result.clipData = ClipData.newRawUri(files[0].name, uris[0]).apply { uris.drop(1).forEach { addItem(ClipData.Item(it)) } }
+        result.clipData = ClipData.newRawUri("file", uris[0]).apply { uris.drop(1).forEach { addItem(ClipData.Item(it)) } }
         setResult(RESULT_OK, result)
         // Handed to the app that asked: auto-lock waits for a big file it reads from the vault,
         // as when a file is opened in another app.

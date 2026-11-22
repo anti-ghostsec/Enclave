@@ -289,4 +289,18 @@ object Session {
     }
 
     val current get() = _state.value
+
+    /**
+     * Counts up each time the lock screen must start over: Enclave left the screen with no vault
+     * open, or the screen turned off. The calculator front stands in front again, and whatever
+     * was typed or chosen on the lock screen (a password, a keyfile) is gone. Without this, the
+     * code typed once left the password screen behind the calculator icon until a vault was
+     * opened and locked, for whoever opened "Calculator" next.
+     */
+    private val _front = MutableStateFlow(0)
+    val front: StateFlow<Int> = _front
+
+    fun closeFront() {
+        _front.value++
+    }
 }

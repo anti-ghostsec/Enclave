@@ -63,9 +63,12 @@ open class KeystoreKey(private val alias: String, private val preferStrongBox: B
         return c.doFinal(sealed, Aead.NONCE_BYTES, sealed.size - Aead.NONCE_BYTES)
     }
 
-    fun destroy() {
-        runCatching { keyStore().deleteEntry(alias) }
-    }
+    /** Deletes the key. Returns whether it's gone for certain: asked for again afterwards. */
+    fun destroy(): Boolean = runCatching {
+        val ks = keyStore()
+        ks.deleteEntry(alias)
+        !ks.containsAlias(alias)
+    }.getOrDefault(false)
 
     /** Whether the key exists. Throws if the keystore can't be asked. */
     fun exists(): Boolean = keyStore().containsAlias(alias)

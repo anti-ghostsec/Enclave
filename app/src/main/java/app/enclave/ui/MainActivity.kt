@@ -19,6 +19,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -81,10 +82,14 @@ private fun Root() {
     val unlocked by Session.state.collectAsStateWithLifecycle()
     val busy by Session.busy.collectAsStateWithLifecycle()
     var exists by remember { mutableStateOf(VaultManager.exists()) }
-    var facadePassed by remember { mutableStateOf(false) }
+    // The code counts only until the lock screen next starts over (see Session.front). Read
+    // while this screen is stopped too, so the calculator is back before it's shown again.
+    val front by Session.front.collectAsState()
+    var passedAt by remember { mutableStateOf(-1) }
+    val facadePassed = passedAt == front
 
     LaunchedEffect(unlocked) {
-        if (unlocked == null) facadePassed = false
+        if (unlocked == null) passedAt = -1
         exists = VaultManager.exists()
     }
 
@@ -96,8 +101,9 @@ private fun Root() {
         b != null -> BusyScreen(b)
         // The calculator front comes before everything else, the offer to create a vault too:
         // whatever happened to the vault, a calculator icon opens on a calculator.
-        PlainPrefs.calculatorFacade && !facadePassed -> CalculatorScreen(onSecret = { facadePassed = true })
+        PlainPrefs.calculatorFacade && !facadePassed -> CalculatorScreen(onSecret = { passedAt = front })
         !exists -> SetupScreen()
-        else -> LockScreen()
+        // Keyed, so a typed password or a chosen keyfile doesn't outlive the front closing.
+        else -> key(front) { LockScreen() }
     }
 }

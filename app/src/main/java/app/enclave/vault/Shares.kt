@@ -3,6 +3,8 @@ package app.enclave.vault
 import android.content.Context
 import android.net.Uri
 import app.enclave.crypto.Aead
+import app.enclave.crypto.ChunkedCipher
+import app.enclave.crypto.Scrub
 import app.enclave.crypto.BlobSource
 import java.util.concurrent.ConcurrentHashMap
 
@@ -17,7 +19,8 @@ import java.util.concurrent.ConcurrentHashMap
  * a share ends, its key is zeroed and every reader open on it is closed, zeroing their copies.
  *
  * A link is content://<package>.files/<random token>/file.<extension>: the file's name isn't in
- * it (the receiving app asks for that, see DecryptedFileProvider), only the extension, which the
+ * it (the receiving app asks for a name and gets a made-up one unless Settings says otherwise,
+ * see DecryptedFileProvider), only the extension, which the
  * file's type gives away anyway and some apps need to recognise it. The authority keeps the
  * package name: it has to be unique on the phone, and any app can look up which package owns an
  * authority, so another name wouldn't hide anything.
@@ -31,7 +34,20 @@ object Shares {
         val needsVault: Boolean,
         /** Which vault it's from (see [VaultStore.shareOwner]). */
         val owner: ByteArray,
+        /** Whether what the file says about where and how it was made is taken out (see [Scrub]). */
+        val scrub: Boolean = false,
     ) {
+        @Volatile private var patches: List<Scrub.Patch>? = null
+
+        /** What to write over in the bytes handed out, worked out once from the first reader. */
+        internal fun patches(reader: ChunkedCipher.Reader): List<Scrub.Patch> {
+            if (!scrub) return emptyList()
+            patches?.let { return it }
+            return synchronized(this) {
+                patches ?: Scrub.patches({ offset, buf, off, len -> reader.read(offset, buf, off, len) }, reader.size).also { patches = it }
+            }
+        }
+
         /** Readers open on it (see DecryptedFileProvider), each with its own copy of the key. */
         internal val readers: MutableSet<java.io.Closeable> = ConcurrentHashMap.newKeySet()
 
@@ -51,13 +67,18 @@ object Shares {
 
     fun create(context: Context, store: VaultStore, e: Entry): Uri {
         val token = Aead.hex(Aead.random(16))
+        val settings = store.settings.value
+        val ext = e.name.substringAfterLast('.', "").lowercase().takeIf { it.isNotEmpty() && it.length <= 8 && it.all(Char::isLetterOrDigit) }
+        // The name the other app is told: the real one only if Settings says so. Otherwise a
+        // made-up one, so it doesn't end up in that app's list of recent files or in an upload.
+        val name = if (settings.shareRealNames) e.name else Aead.hex(Aead.random(4)) + if (ext != null) ".$ext" else ""
         live[token] = Share(
-            store.shareSource(e), store.keyBytes(e), e.name, e.mime, e.size, now() + LIFETIME_MS,
+            store.shareSource(e), store.keyBytes(e), name, e.mime, e.size, now() + LIFETIME_MS,
             needsVault = !store.sharesOutliveLock(e), owner = store.shareOwner.copyOf(),
+            scrub = settings.stripMetadata,
         )
         // Expired links are swept away (their keys zeroed) even if nothing asks for them again.
         main.postDelayed({ sweep() }, LIFETIME_MS + 1000)
-        val ext = e.name.substringAfterLast('.', "").lowercase().takeIf { it.isNotEmpty() && it.length <= 8 && it.all(Char::isLetterOrDigit) }
         return Uri.parse("content://${context.packageName}.files/$token" + if (ext != null) "/file.$ext" else "")
     }
 

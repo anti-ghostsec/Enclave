@@ -45,6 +45,7 @@ class EnclaveApp : Application() {
     private fun lockNow() {
         Session.lock()
         Shares.clear()
+        Session.closeFront()
     }
 
     override fun onCreate() {
@@ -92,6 +93,9 @@ class EnclaveApp : Application() {
                 val power = getSystemService(android.os.PowerManager::class.java)
                 if (power != null && !power.isInteractive) lockNow()
                 val onPurpose = Session.leavingOnPurpose()
+                // With no vault open the lock screen starts over, unless Enclave itself sent the
+                // user away to choose a keyfile.
+                if (Session.current == null && Session.busy.value == null && !onPurpose) Session.closeFront()
                 val delay = Session.lockDelayMs(app.enclave.vault.VaultActions.autoLockSeconds() * 1000L)
                 val now = android.os.SystemClock.elapsedRealtime()
                 var due = now + delay
@@ -117,6 +121,7 @@ class EnclaveApp : Application() {
             override fun onReceive(c: Context, i: Intent) {
                 Session.lock()
                 Shares.clear()
+                Session.closeFront()
             }
         }, IntentFilter(Intent.ACTION_SCREEN_OFF), ContextCompat.RECEIVER_NOT_EXPORTED)
     }

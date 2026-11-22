@@ -66,6 +66,10 @@ data class VaultSettings(
     val shareApps: List<String> = emptyList(),
     /** Show what's being sent and to which app, and ask before sending. */
     val confirmShare: Boolean = true,
+    /** Take position, camera and other details out of the photos and videos other apps are given. */
+    val stripMetadata: Boolean = true,
+    /** Give other apps a file's real name. Off: they get a made-up one with the same extension. */
+    val shareRealNames: Boolean = false,
 )
 
 /** An import that Enclave itself refused, with a message that's safe to show. */
@@ -568,7 +572,13 @@ class VaultStore(
             } else {
                 val f = freeName(into, e.name)
                 check(inside(f)) { "refused to write outside the chosen folder" }
-                f.outputStream().use { export(e, it) }
+                try {
+                    f.outputStream().use { export(e, it) }
+                } catch (t: Throwable) {
+                    // Half a decrypted file is not left lying in the chosen folder.
+                    f.delete()
+                    throw t
+                }
                 count++
             }
         }

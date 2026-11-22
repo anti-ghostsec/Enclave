@@ -70,7 +70,7 @@ object Opener {
         if (uris != null) {
             if (files.size == 1) send.putExtra(Intent.EXTRA_STREAM, uris[0])
             else send.putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
-            send.clipData = android.content.ClipData.newRawUri(files[0].name, uris[0]).apply {
+            send.clipData = android.content.ClipData.newRawUri("file", uris[0]).apply {
                 uris.drop(1).forEach { addItem(android.content.ClipData.Item(it)) }
             }
             send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)

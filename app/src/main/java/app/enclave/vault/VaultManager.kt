@@ -4,6 +4,7 @@ import android.content.Context
 import app.enclave.crypto.Aead
 import app.enclave.crypto.HardwareKey
 import app.enclave.crypto.Kdf
+import app.enclave.crypto.StateKey
 import app.enclave.crypto.WipeMark
 import java.io.File
 import java.nio.ByteBuffer
@@ -151,6 +152,11 @@ object VaultManager {
      */
     fun create(password: CharArray, keyfileSecret: ByteArray?): UnlockResult {
         if (!PlainPrefs.resetFailures()) throw java.io.IOException("couldn't save the lock settings")
+        // A wipe still marked as unfinished (its key couldn't be deleted then) is finished here,
+        // not at the next start, where it would take this new vault with it. With no header yet,
+        // the new one also gets a key of its own.
+        if (!headerFile.exists()) HardwareKey.destroy()
+        runCatching { if (WipeMark.pending() != null && HardwareKey.destroy()) WipeMark.clear() }
         val h = Header(Kdf.DEFAULT, Aead.random(32), Array(Header.SLOT_COUNT) { Header.randomSlot() })
         val slot = slotRng.nextInt(Header.SLOT_COUNT)
         val master = Aead.random(Aead.KEY_BYTES)
@@ -178,7 +184,14 @@ object VaultManager {
      * must never put the real vault out of reach.
      */
     fun unlock(password: CharArray, keyfileSecret: ByteArray?, tag: ((ByteArray) -> Unit)? = null): UnlockResult? {
-        val h = read()
+        val h = try {
+            read()
+        } catch (e: Exception) {
+            // Sealed by a key that's gone (a wipe cut off at the wrong moment) or not a header
+            // at all: no password opens it. Anything that may pass is thrown as before.
+            if (StateKey.isRejection(e) || e is IllegalArgumentException || e is java.nio.BufferUnderflowException) return null
+            throw e
+        }
         val kek = Kdf.derive(password, keyfileSecret, h.salt, h.params)
         try {
             tag?.invoke(passwordTag(kek))
@@ -276,12 +289,14 @@ object VaultManager {
      */
     fun wipeAll(keepLockScreen: Boolean) {
         runCatching { WipeMark.set(if (keepLockScreen) WipeMark.Kind.HIDDEN else WipeMark.Kind.OPEN) }
-        HardwareKey.destroy()
+        // The key is what makes everything unreadable: if the keystore didn't delete it, the
+        // wipe isn't done, whatever happens to the files, and the mark stays so it's tried again.
+        val shredded = HardwareKey.destroy()
         // If the new header can't be written (storage full, say), the old one stays where it is,
-        // unreadable for good now its key is gone, and the mark stays so this is tried again.
-        val done = if (keepLockScreen) runCatching { createUnopenable() }.isSuccess else headerFile.delete() || !headerFile.exists()
+        // unreadable for good once its key is gone, and the mark stays too.
+        val replaced = if (keepLockScreen) runCatching { createUnopenable() }.isSuccess else headerFile.delete() || !headerFile.exists()
         File(headerFile.path + ".tmp").delete()
         vaultsRoot.deleteRecursively()
-        if (done) WipeMark.clear()
+        if (shredded && replaced) WipeMark.clear()
     }
 }

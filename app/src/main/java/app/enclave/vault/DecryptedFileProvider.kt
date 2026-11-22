@@ -14,6 +14,7 @@ import android.provider.OpenableColumns
 import android.system.ErrnoException
 import android.system.OsConstants
 import app.enclave.crypto.ChunkedCipher
+import app.enclave.crypto.Scrub
 import java.io.FileNotFoundException
 
 /**
@@ -52,7 +53,9 @@ class DecryptedFileProvider : ContentProvider() {
                 override fun onRead(offset: Long, size: Int, data: ByteArray): Int {
                     if (!Shares.isLive(uri)) throw ErrnoException("read", OsConstants.EACCES)
                     return try {
-                        reader.read(offset, data, 0, size).coerceAtLeast(0)
+                        val n = reader.read(offset, data, 0, size).coerceAtLeast(0)
+                        Scrub.apply(sh.patches(reader), offset, data, n)
+                        n
                     } catch (_: Exception) {
                         // Closed by the share's end mid-read, or the file couldn't be read.
                         throw ErrnoException("read", OsConstants.EIO)

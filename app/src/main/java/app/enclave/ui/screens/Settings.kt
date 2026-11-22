@@ -290,7 +290,7 @@ private fun AddDuressDialog(onDone: () -> Unit) {
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(label, { label = it }, label = { Text("Name (only you see this)") }, singleLine = true, keyboardOptions = PrivateKeyboard)
-                PasswordField(pw, { pw = it }, "Duress password")
+                PasswordField(pw, { pw = it }, "Duress password (8 characters or more)")
                 listOf(
                     "decoy" to "Open a decoy vault — put some harmless files in it so it looks real",
                     "wipe" to "Wipe everything, then show an empty vault",
@@ -306,7 +306,7 @@ private fun AddDuressDialog(onDone: () -> Unit) {
             }
         },
         confirmButton = {
-            TextButton(enabled = !busy && pw.length >= 4, onClick = {
+            TextButton(enabled = !busy && pw.length >= 8, onClick = {
                 busy = true; error = null
                 scope.launch {
                     val added = withContext(Dispatchers.Default) { withChars(pw) { VaultActions.addDuress(it, action, label) } }
@@ -476,6 +476,23 @@ private fun OpeningSettings(s: Session.Unlocked) {
         supportingContent = { Text("Shows the files and the app, and asks before anything leaves Enclave.") },
         trailingContent = {
             Switch(checked = settings.confirmShare, onCheckedChange = { on -> s.store.updateSettings { it.copy(confirmShare = on) } })
+        },
+    )
+    ListItem(
+        headlineContent = { Text("Remove location and camera details") },
+        supportingContent = {
+            Text("Photos (JPEG, PNG) and videos (MP4, MOV) reach other apps without their GPS position, camera model, dates and comments. " +
+                "Other kinds, HEIC photos among them, are sent as they are. The copy in the vault and “Export decrypted copy” keep everything.")
+        },
+        trailingContent = {
+            Switch(checked = settings.stripMetadata, onCheckedChange = { on -> s.store.updateSettings { it.copy(stripMetadata = on) } })
+        },
+    )
+    ListItem(
+        headlineContent = { Text("Send files under their real names") },
+        supportingContent = { Text("Off: other apps are told a made-up name, so the real one isn't in their recent files or in an upload.") },
+        trailingContent = {
+            Switch(checked = settings.shareRealNames, onCheckedChange = { on -> s.store.updateSettings { it.copy(shareRealNames = on) } })
         },
     )
     if (editingShare) {
